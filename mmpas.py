@@ -45,7 +45,7 @@ TRAINING_KEYWORDS = [
 def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {"address": addr, "key": API_KEY}
-    r = requests.get(url, params=params, timeout=20)
+    r = requests.get(url, params=params, timeout=15)
     data = r.json()
     if data.get("status") != "OK" or not data.get("results"):
         return None
@@ -53,34 +53,21 @@ def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
     loc = res["geometry"]["location"]
     return (loc["lat"], loc["lng"], res.get("formatted_address", addr))
 
-def nearby_search(lat: float, lng: float, radius_m: int, types: List[str], keyword: Optional[str] = None, max_pages: int = 2) -> List[Dict]:
+def nearby_search(lat: float, lng: float, radius_m: int, types: List[str], keyword: Optional[str] = None, max_pages: int = 1) -> List[Dict]:
+    """Fetch nearby places faster by limiting to 1 page by default."""
     all_results: Dict[str, Dict] = {}
     base = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 
     def one_call(params: Dict) -> None:
         nonlocal all_results
-        page = 0
-        next_token = None
-        while True:
-            q = params.copy()
-            if next_token:
-                q["pagetoken"] = next_token
-            resp = requests.get(base, params=q, timeout=30)
-            payload = resp.json()
-            if payload.get("status") not in ("OK", "ZERO_RESULTS"):
-                if payload.get("status") == "INVALID_REQUEST" and next_token:
-                    time.sleep(2)
-                    continue
-                break
-            for pl in payload.get("results", []):
-                pid = pl.get("place_id")
-                if pid and pid not in all_results:
-                    all_results[pid] = pl
-            next_token = payload.get("next_page_token")
-            page += 1
-            if not next_token or page >= max_pages:
-                break
-            time.sleep(2)
+        resp = requests.get(base, params=params, timeout=15)
+        payload = resp.json()
+        if payload.get("status") not in ("OK", "ZERO_RESULTS"):
+            return
+        for pl in payload.get("results", []):
+            pid = pl.get("place_id")
+            if pid and pid not in all_results:
+                all_results[pid] = pl
 
     for t in types:
         params = {"key": API_KEY, "location": f"{lat},{lng}", "radius": radius_m, "type": t}
@@ -120,21 +107,23 @@ if HAS_GEO:
             got_loc = True
             st.success(f"Got device location: {lat:.5f}, {lng:.5f}")
 
-with st.sidebar.expander("🔎 Or search an address/city", expanded=not got_loc):
-    addr = st.text_input("Type address/city", value="Islamabad, Pakistan")
+with st.sidebar.expander("🔎 Or search by city/area", expanded=not got_loc):
+    city = st.text_input("City", value="Islamabad")
+    area = st.text_input("Area / Locality (optional)", value="")
     if st.button("Locate"):
-        out = geocode_address(addr)
+        query = f"{area}, {city}" if area else city
+        out = geocode_address(query)
         if out:
             lat, lng, faddr = out
             st.success(f"Centered to: {faddr}")
             got_loc = True
         else:
-            st.error("Could not find that address.")
+            st.error("Could not find that location.")
 
 if not got_loc:
     lat, lng = 33.6844, 73.0479  # Islamabad default
 
-radius_km = st.sidebar.slider("Radius (km)", 1, 30, 5)
+radius_km = st.sidebar.slider("Radius (km)", 1, 15, 3)  # smaller default radius for speed
 radius_m = radius_km * 1000
 
 st.sidebar.subheader("Categories")
@@ -145,7 +134,7 @@ selected = st.sidebar.multiselect(
 )
 
 extra_kw = st.sidebar.text_input("Extra keyword (optional)", value="")
-max_pages = st.sidebar.select_slider("Pages per type", options=[1,2,3], value=2)
+max_pages = st.sidebar.select_slider("Pages per type", options=[1, 2], value=1)  # fewer pages = faster
 
 # ----------------------------
 # Load Events (TXT instead of CSV)
@@ -153,7 +142,7 @@ max_pages = st.sidebar.select_slider("Pages per type", options=[1,2,3], value=2)
 @st.cache_data
 def load_events() -> pd.DataFrame:
     try:
-        df = pd.read_csv("events.txt")  # 👈 using .txt
+        df = pd.read_csv("events.txt")
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df.dropna(subset=["lat", "lng", "date"])
     except Exception:
@@ -167,9 +156,9 @@ events = events[events["date"] >= today].sort_values("date")
 # Fetch Google Places
 # ----------------------------
 st.title("Nearby Training & Schools + Upcoming Events")
-st.caption("Live Google Places data + custom events overlay (from events.txt)")
+st.caption("Live Google Places data + events overlay (from events.txt). Optimized for faster map loading.")
 
-with st.spinner("Searching Google Places…"):
+with st.spinner("Fetching nearby places…"):
     results = nearby_search(lat, lng, radius_m, selected, keyword=extra_kw.strip() or None, max_pages=max_pages)
 
 def rating_key(p):
@@ -217,8 +206,6 @@ MAP_HTML = f"""
   <body><div id="map"></div>
   <script>
     const center = {{lat: {lat}, lng: {lng}}};
-    const places = {json.dumps(place_markers)};
-    const events = {json.dumps(event_markers)};
     const map = new google.maps.Map(document.getElementById('map'), {{
       center: center, zoom: {14 if radius_km<=5 else 12}, mapTypeControl:false
     }});
@@ -230,18 +217,22 @@ MAP_HTML = f"""
 
     const infow = new google.maps.InfoWindow();
 
+    // Places
+    const places = {json.dumps(place_markers)};
     places.forEach(m => {{
       const mk = new google.maps.Marker({{position:{{lat:m.lat,lng:m.lng}},map,title:m.name}});
       const html = `<b>${{m.name}}</b><br/>${{m.addr}}<br/>⭐ ${{m.rating}} (${{m.total}})<br/>${{m.open}}<br/><a href="${{m.link}}" target="_blank">Open in Google Maps</a>`;
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
 
+    // Events
+    const events = {json.dumps(event_markers)};
     events.forEach(e => {{
       const mk = new google.maps.Marker({{
         position:{{lat:e.lat,lng:e.lng}}, map, title:e.name,
         icon: "http://maps.google.com/mapfiles/ms/icons/orange-dot.png"
       }});
-      const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/><a href="${{e.link}}" target="_blank">More info</a>`;
+      const html = `<b>${{e.name}}</b><br/>📅 ${e.date}<br/>${{e.addr}}<br/>` + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
   </script></body>
@@ -258,9 +249,10 @@ if events.empty:
     st.info("No upcoming events found in events.txt")
 else:
     for _, e in events.iterrows():
+        link_md = f"[More Info]({e['link']})" if pd.notna(e['link']) and e['link'] else ""
         st.markdown(f"""
         **{e['name']}**  
         📅 {e['date'].date()}  
         {e['description']}  
-        [More Info]({e['link']})
+        {link_md}
         """)
