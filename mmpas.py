@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 import requests
 import streamlit as st
 
+API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
+
 # Optional geolocation (graceful fallback)
 try:
     from streamlit_geolocation import geolocation
