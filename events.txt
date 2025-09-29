@@ -1,6 +1,1 @@
-name,lat,lng,date,type,description,link
-NED University Data Science Admission,24.9310,67.1127,2025-10-15,admission,"Admissions open for Data Science batch",https://www.neduet.edu.pk
-IBP Compliance Workshop,24.8426,66.9989,2025-10-20,workshop,"Compliance & AML training for bankers",https://ibp.org.pk/events
-FAST-NU AI Bootcamp,33.6518,73.1566,2025-11-05,bootcamp,"Hands-on Artificial Intelligence Bootcamp",https://nu.edu.pk
-LUMS MBA Admissions,31.4710,74.4060,2025-11-30,admission,"MBA Fall 2025 admissions open at LUMS",https://lums.edu.pk
-IBA Karachi Data Science Workshop,24.8650,67.0822,2025-12-10,workshop,"Weekend workshop on Data Science & Python",https://iba.edu.pk
+
