@@ -1,5 +1,4 @@
 import json
-import time
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
@@ -187,7 +186,7 @@ place_markers = [to_marker(p) for p in results_sorted if p.get("geometry",{}).ge
 event_markers = []
 for _, e in events.iterrows():
     event_markers.append({
-        "lat": e["lat"], "lng": e["lng"],
+        "lat": float(e["lat"]), "lng": float(e["lng"]),
         "name": e["name"], "addr": e.get("description",""),
         "date": str(e["date"].date()), "link": e.get("link","")
     })
@@ -232,7 +231,7 @@ MAP_HTML = f"""
         position:{{lat:e.lat,lng:e.lng}}, map, title:e.name,
         icon: "http://maps.google.com/mapfiles/ms/icons/orange-dot.png"
       }});
-      const html = `<b>${{e.name}}</b><br/>📅 ${e.date}<br/>${{e.addr}}<br/>` + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
+      const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/>` + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
   </script></body>
