@@ -132,8 +132,67 @@ selected = st.sidebar.multiselect(
     default=["training_like", "school", "university"]
 )
 
-extra_kw = st.sidebar.text_input("Extra keyword (optional)", value="")
-max_pages = st.sidebar.select_slider("Pages per type", options=[1, 2], value=1)  # fewer pages = faster
+st.sidebar.subheader("Search Focus")
+
+search_type = st.sidebar.radio("What are you looking for?", ["Trainings", "Academic Programs"])
+
+training_options = [
+    "Communication Training",
+    "Data Science Training",
+    "Cyber Security Training",
+    "App development Training",
+    "IT Training",
+    "Education training"
+]
+
+bsc_options = [
+    "BSc Data Science",
+    "BSc IT",
+    "BSc Communication",
+    "BSc Cyber Security",
+    "BBA",
+    "BSc Liberal Arts",
+    "BSc Computer Science",
+    "BSc Engineering"
+    
+]
+
+msc_options = [
+    "MSc Data Science",
+    "MSc IT",
+    "MSc Communication",
+    "MSc Cyber Security",
+    "MBA",
+    "MA Business",
+    "MSc Computer Science"
+]
+
+diploma_options = [
+    "Diploma in Data Science",
+    "Diploma in IT",
+    "Diploma in Communication",
+    "Diploma in Cyber Security",
+    "Diploma in Business",
+    "Diploma in HR",
+    "Diploma in Health",
+    
+]
+
+if search_type == "Trainings":
+    selected_kw = st.sidebar.selectbox("Select Training Category", training_options)
+
+else:
+    program_type = st.sidebar.radio("Choose Program Type", ["BSc", "MSc", "Diploma"])
+    if program_type == "BSc":
+        selected_kw = st.sidebar.selectbox("Select BSc Program", bsc_options)
+    elif program_type == "MSc":
+        selected_kw = st.sidebar.selectbox("Select MSc Program", msc_options)
+    else:
+        selected_kw = st.sidebar.selectbox("Select Diploma", diploma_options)
+
+# Pass this keyword into the search
+extra_kw = selected_kw
+max_pages = st.sidebar.select_slider("Pages per type", options=[1, 2], value=1)
 
 # ----------------------------
 # Load Events (TXT instead of CSV)
