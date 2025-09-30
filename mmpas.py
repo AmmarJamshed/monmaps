@@ -1,13 +1,14 @@
 import json
-from datetime import date
 from typing import Dict, List, Optional, Tuple
+from datetime import datetime, date, timedelta
 
 import requests
-import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
+from dateutil import parser
+import re
 
 # ----------------------------
 # Config
@@ -60,7 +61,6 @@ def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
     return (loc["lat"], loc["lng"], res.get("formatted_address", addr))
 
 def nearby_search(lat: float, lng: float, radius_m: int, types: List[str], keyword: Optional[str] = None, max_pages: int = 1) -> List[Dict]:
-    """Fetch nearby places faster by limiting to 1 page by default."""
     all_results: Dict[str, Dict] = {}
     base = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 
@@ -101,8 +101,7 @@ def gmaps_place_link(place_id: str) -> str:
 # ----------------------------
 # Google scraping for events
 # ----------------------------
-def scrape_google_events(city: str, keyword: str, max_results: int = 8):
-    """Scrape Google Search for trainings/workshops"""
+def scrape_google_events(city: str, keyword: str, max_results: int = 12):
     query = f"{keyword} {city} training workshop certification site:.org OR site:.edu OR site:.pk"
     url = "https://www.google.com/search"
     params = {"q": query, "hl": "en"}
@@ -115,6 +114,8 @@ def scrape_google_events(city: str, keyword: str, max_results: int = 8):
     soup = BeautifulSoup(r.text, "html.parser")
 
     results = []
+    today = datetime.today().date()
+
     for g in soup.select("div.g")[:max_results]:
         title_tag = g.select_one("h3")
         link_tag = g.select_one("a")
@@ -123,13 +124,33 @@ def scrape_google_events(city: str, keyword: str, max_results: int = 8):
         if not title_tag or not link_tag:
             continue
 
+        title = title_tag.get_text(" ", strip=True)
+        snippet = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
+        link = link_tag["href"]
+
+        event_date = None
+        date_match = re.search(
+            r"(\d{1,2}\s+\w+\s+\d{4}|\d{1,2}\s+\w+|\w+\s+\d{1,2},?\s*\d{4}?)",
+            snippet, re.I
+        )
+        if date_match:
+            try:
+                parsed_date = parser.parse(date_match.group(0), fuzzy=True).date()
+                if parsed_date >= today:
+                    event_date = parsed_date
+            except:
+                pass
+
         results.append({
-            "name": title_tag.get_text(" ", strip=True),
-            "description": snippet_tag.get_text(" ", strip=True) if snippet_tag else "",
-            "link": link_tag["href"]
+            "name": title,
+            "description": snippet,
+            "link": link,
+            "date": event_date
         })
 
-    return results
+    future_events = [e for e in results if not e["date"] or e["date"] >= today]
+    future_events.sort(key=lambda x: (x["date"] is None, x["date"] or datetime.max.date()))
+    return future_events
 
 # ----------------------------
 # Sidebar controls
@@ -160,7 +181,7 @@ with st.sidebar.expander("🔎 Or search by city/area", expanded=not got_loc):
             st.error("Could not find that location.")
 
 if not got_loc:
-    lat, lng = 33.6844, 73.0479  # Islamabad default
+    lat, lng = 33.6844, 73.0479
     city = "Islamabad"
 
 radius_km = st.sidebar.slider("Radius (km)", 1, 15, 3)
@@ -211,56 +232,69 @@ else:
 extra_kw = selected_kw
 max_pages = st.sidebar.select_slider("Pages per type", options=[1, 2], value=1)
 
+st.sidebar.subheader("Filter by Event Date")
+date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value=None)
+
 # ----------------------------
-# Fetch Google Places + Events
+# Fetch Places + Events
 # ----------------------------
 st.title("Nearby Training & Schools + Live Events")
-st.caption("Live Google Places data + Google Search events overlay. Auto-refresh enabled.")
+st.caption("Google Places + Google Search events with auto-refresh and calendar filter.")
 
 with st.spinner("Fetching nearby places…"):
     results = nearby_search(lat, lng, radius_m, selected, keyword=extra_kw.strip() or None, max_pages=max_pages)
 
-def rating_key(p):
-    return (-p.get("rating", 0), -p.get("user_ratings_total", 0))
-
-results_sorted = sorted(results, key=rating_key)
+results_sorted = sorted(results, key=lambda p: (-p.get("rating", 0), -p.get("user_ratings_total", 0)))
 
 with st.spinner("Scraping live Google events…"):
     events = scrape_google_events(city, extra_kw)
 
-st.subheader(f"Found {len(results_sorted)} places and {len(events)} live events")
+st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
 
 # ----------------------------
-# Prepare markers
+# Event Markers with Colors
 # ----------------------------
-def to_marker(p: Dict) -> Dict:
-    loc = p.get("geometry", {}).get("location", {})
-    return {
-        "lat": loc.get("lat"), "lng": loc.get("lng"),
-        "name": p.get("name","Untitled"),
-        "addr": p.get("vicinity") or p.get("formatted_address") or "",
-        "rating": p.get("rating",""), "total": p.get("user_ratings_total",""),
-        "open": fmt_opening_hours(p.get("opening_hours", {})),
-        "link": gmaps_place_link(p.get("place_id",""))
-    }
-
-place_markers = [to_marker(p) for p in results_sorted if p.get("geometry",{}).get("location")]
+today = datetime.today().date()
+tomorrow = today + timedelta(days=1)
 
 event_markers = []
 for e in events:
-    geo = geocode_address(city)  # crude city-level location
-    if geo:
-        lat_ev, lng_ev, _ = geo
-        event_markers.append({
-            "lat": lat_ev, "lng": lng_ev,
-            "name": e["name"],
-            "addr": e.get("description",""),
-            "date": "Live Search",
-            "link": e.get("link","")
-        })
+    geo = geocode_address(city)
+    if not geo:
+        continue
+    lat_ev, lng_ev, _ = geo
+
+    if e["date"] == today:
+        icon = "http://maps.google.com/mapfiles/ms/icons/green-dot.png"
+    elif e["date"] == tomorrow:
+        icon = "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+    elif e["date"] and e["date"] > tomorrow:
+        icon = "http://maps.google.com/mapfiles/ms/icons/orange-dot.png"
+    else:
+        icon = "http://maps.google.com/mapfiles/ms/icons/grey-dot.png"
+
+    event_markers.append({
+        "lat": lat_ev, "lng": lng_ev,
+        "name": e["name"],
+        "addr": e.get("description", ""),
+        "date": e["date"].strftime("%Y-%m-%d") if e["date"] else "Unspecified",
+        "link": e.get("link", ""),
+        "icon": icon
+    })
+
+place_markers = [{
+    "lat": p["geometry"]["location"]["lat"],
+    "lng": p["geometry"]["location"]["lng"],
+    "name": p.get("name", "Untitled"),
+    "addr": p.get("vicinity") or p.get("formatted_address") or "",
+    "rating": p.get("rating", ""),
+    "total": p.get("user_ratings_total", ""),
+    "open": fmt_opening_hours(p.get("opening_hours", {})),
+    "link": gmaps_place_link(p.get("place_id", ""))
+} for p in results_sorted if "geometry" in p]
 
 # ----------------------------
-# Render map
+# Map Rendering
 # ----------------------------
 MAP_HTML = f"""
 <!DOCTYPE html>
@@ -284,7 +318,6 @@ MAP_HTML = f"""
 
     const infow = new google.maps.InfoWindow();
 
-    // Places
     const places = {json.dumps(place_markers)};
     places.forEach(m => {{
       const mk = new google.maps.Marker({{position:{{lat:m.lat,lng:m.lng}},map,title:m.name}});
@@ -292,14 +325,13 @@ MAP_HTML = f"""
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
 
-    // Events
     const events = {json.dumps(event_markers)};
     events.forEach(e => {{
       const mk = new google.maps.Marker({{
         position:{{lat:e.lat,lng:e.lng}}, map, title:e.name,
-        icon: "http://maps.google.com/mapfiles/ms/icons/orange-dot.png"
+        icon: e.icon
       }});
-      const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/>` + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
+      const html = `<b>${{e.name}}</b><br/>📅 ${e.date}<br/>${{e.addr}}<br/>` + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
   </script></body>
@@ -309,16 +341,34 @@ MAP_HTML = f"""
 components.html(MAP_HTML, height=560, scrolling=False)
 
 # ----------------------------
-# List view
+# Calendar-Style Event List
 # ----------------------------
-st.subheader("Live Events (Scraped)")
+st.subheader("Live & Upcoming Events (Calendar View)")
+
 if not events:
-    st.info("No live events found for this query.")
+    st.info("No upcoming events found.")
 else:
-    for e in events:
-        link_md = f"[More Info]({e['link']})" if e['link'] else ""
-        st.markdown(f"""
-        **{e['name']}**  
-        {e['description']}  
-        {link_md}
-        """)
+    if date_filter:
+        filtered_events = [e for e in events if e["date"] and e["date"] == date_filter]
+    else:
+        filtered_events = events
+
+    if not filtered_events:
+        st.warning("No events found for this date.")
+    else:
+        current_date = None
+        for e in filtered_events:
+            if e["date"] and e["date"] != current_date:
+                st.markdown(f"### 📅 {e['date'].strftime('%A, %d %B %Y')}")
+                current_date = e["date"]
+
+            if not e["date"] and current_date != "Unspecified":
+                st.markdown("### ❓ Unspecified Date")
+                current_date = "Unspecified"
+
+            link_md = f"[More Info]({e['link']})" if e['link'] else ""
+            st.markdown(f"""
+            **{e['name']}**  
+            {e['description']}  
+            {link_md}
+            """)
