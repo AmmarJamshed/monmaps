@@ -5,15 +5,9 @@ from typing import Dict, List, Optional, Tuple
 import requests
 import pandas as pd
 import streamlit as st
-
-# Optional geolocation (graceful fallback if missing)
-try:
-    from streamlit_geolocation import geolocation
-    HAS_GEO = True
-except Exception:
-    HAS_GEO = False
-
 import streamlit.components.v1 as components
+from bs4 import BeautifulSoup
+from streamlit_autorefresh import st_autorefresh
 
 # ----------------------------
 # Config
@@ -24,6 +18,19 @@ API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
 if not API_KEY:
     st.error("Add GOOGLE_MAPS_API_KEY in .streamlit/secrets.toml to run this app.")
     st.stop()
+
+# Auto-refresh control
+refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5)
+st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
+
+# ----------------------------
+# Geolocation support
+# ----------------------------
+try:
+    from streamlit_geolocation import geolocation
+    HAS_GEO = True
+except Exception:
+    HAS_GEO = False
 
 CATEGORIES = {
     "school": "Schools",
@@ -92,6 +99,39 @@ def gmaps_place_link(place_id: str) -> str:
     return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
 
 # ----------------------------
+# Google scraping for events
+# ----------------------------
+def scrape_google_events(city: str, keyword: str, max_results: int = 8):
+    """Scrape Google Search for trainings/workshops"""
+    query = f"{keyword} {city} training workshop certification site:.org OR site:.edu OR site:.pk"
+    url = "https://www.google.com/search"
+    params = {"q": query, "hl": "en"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/115.0 Safari/537.36"
+    }
+    r = requests.get(url, params=params, headers=headers, timeout=15)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    results = []
+    for g in soup.select("div.g")[:max_results]:
+        title_tag = g.select_one("h3")
+        link_tag = g.select_one("a")
+        snippet_tag = g.select_one("span.aCOpRe")
+
+        if not title_tag or not link_tag:
+            continue
+
+        results.append({
+            "name": title_tag.get_text(" ", strip=True),
+            "description": snippet_tag.get_text(" ", strip=True) if snippet_tag else "",
+            "link": link_tag["href"]
+        })
+
+    return results
+
+# ----------------------------
 # Sidebar controls
 # ----------------------------
 st.sidebar.header("Find Nearby (Google)")
@@ -121,8 +161,9 @@ with st.sidebar.expander("🔎 Or search by city/area", expanded=not got_loc):
 
 if not got_loc:
     lat, lng = 33.6844, 73.0479  # Islamabad default
+    city = "Islamabad"
 
-radius_km = st.sidebar.slider("Radius (km)", 1, 15, 3)  # smaller default radius for speed
+radius_km = st.sidebar.slider("Radius (km)", 1, 15, 3)
 radius_m = radius_km * 1000
 
 st.sidebar.subheader("Categories")
@@ -133,54 +174,31 @@ selected = st.sidebar.multiselect(
 )
 
 st.sidebar.subheader("Search Focus")
-
 search_type = st.sidebar.radio("What are you looking for?", ["Trainings", "Academic Programs"])
 
 training_options = [
-    "Communication Training",
-    "Data Science Training",
-    "Cyber Security Training",
-    "App development Training",
-    "IT Training",
-    "Education training"
+    "Communication Training", "Data Science Training", "Cyber Security Training",
+    "App development Training", "IT Training", "Education training"
 ]
 
 bsc_options = [
-    "BSc Data Science",
-    "BSc IT",
-    "BSc Communication",
-    "BSc Cyber Security",
-    "BBA",
-    "BSc Liberal Arts",
-    "BSc Computer Science",
-    "BSc Engineering"
-    
+    "BSc Data Science", "BSc IT", "BSc Communication", "BSc Cyber Security",
+    "BBA", "BSc Liberal Arts", "BSc Computer Science", "BSc Engineering"
 ]
 
 msc_options = [
-    "MSc Data Science",
-    "MSc IT",
-    "MSc Communication",
-    "MSc Cyber Security",
-    "MBA",
-    "MA Business",
-    "MSc Computer Science"
+    "MSc Data Science", "MSc IT", "MSc Communication", "MSc Cyber Security",
+    "MBA", "MA Business", "MSc Computer Science"
 ]
 
 diploma_options = [
-    "Diploma in Data Science",
-    "Diploma in IT",
-    "Diploma in Communication",
-    "Diploma in Cyber Security",
-    "Diploma in Business",
-    "Diploma in HR",
-    "Diploma in Health",
-    
+    "Diploma in Data Science", "Diploma in IT", "Diploma in Communication",
+    "Diploma in Cyber Security", "Diploma in Business",
+    "Diploma in HR", "Diploma in Health"
 ]
 
 if search_type == "Trainings":
     selected_kw = st.sidebar.selectbox("Select Training Category", training_options)
-
 else:
     program_type = st.sidebar.radio("Choose Program Type", ["BSc", "MSc", "Diploma"])
     if program_type == "BSc":
@@ -190,31 +208,14 @@ else:
     else:
         selected_kw = st.sidebar.selectbox("Select Diploma", diploma_options)
 
-# Pass this keyword into the search
 extra_kw = selected_kw
 max_pages = st.sidebar.select_slider("Pages per type", options=[1, 2], value=1)
 
 # ----------------------------
-# Load Events (TXT instead of CSV)
+# Fetch Google Places + Events
 # ----------------------------
-@st.cache_data
-def load_events() -> pd.DataFrame:
-    try:
-        df = pd.read_csv("events.txt")
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df.dropna(subset=["lat", "lng", "date"])
-    except Exception:
-        return pd.DataFrame(columns=["name","lat","lng","date","type","description","link"])
-
-events = load_events()
-today = pd.to_datetime(date.today())
-events = events[events["date"] >= today].sort_values("date")
-
-# ----------------------------
-# Fetch Google Places
-# ----------------------------
-st.title("Nearby Training & Schools + Upcoming Events")
-st.caption("Live Google Places data + events overlay (from events.txt). Optimized for faster map loading.")
+st.title("Nearby Training & Schools + Live Events")
+st.caption("Live Google Places data + Google Search events overlay. Auto-refresh enabled.")
 
 with st.spinner("Fetching nearby places…"):
     results = nearby_search(lat, lng, radius_m, selected, keyword=extra_kw.strip() or None, max_pages=max_pages)
@@ -224,7 +225,10 @@ def rating_key(p):
 
 results_sorted = sorted(results, key=rating_key)
 
-st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
+with st.spinner("Scraping live Google events…"):
+    events = scrape_google_events(city, extra_kw)
+
+st.subheader(f"Found {len(results_sorted)} places and {len(events)} live events")
 
 # ----------------------------
 # Prepare markers
@@ -243,12 +247,17 @@ def to_marker(p: Dict) -> Dict:
 place_markers = [to_marker(p) for p in results_sorted if p.get("geometry",{}).get("location")]
 
 event_markers = []
-for _, e in events.iterrows():
-    event_markers.append({
-        "lat": float(e["lat"]), "lng": float(e["lng"]),
-        "name": e["name"], "addr": e.get("description",""),
-        "date": str(e["date"].date()), "link": e.get("link","")
-    })
+for e in events:
+    geo = geocode_address(city)  # crude city-level location
+    if geo:
+        lat_ev, lng_ev, _ = geo
+        event_markers.append({
+            "lat": lat_ev, "lng": lng_ev,
+            "name": e["name"],
+            "addr": e.get("description",""),
+            "date": "Live Search",
+            "link": e.get("link","")
+        })
 
 # ----------------------------
 # Render map
@@ -302,15 +311,14 @@ components.html(MAP_HTML, height=560, scrolling=False)
 # ----------------------------
 # List view
 # ----------------------------
-st.subheader("Upcoming Events")
-if events.empty:
-    st.info("No upcoming events found in events.txt")
+st.subheader("Live Events (Scraped)")
+if not events:
+    st.info("No live events found for this query.")
 else:
-    for _, e in events.iterrows():
-        link_md = f"[More Info]({e['link']})" if pd.notna(e['link']) and e['link'] else ""
+    for e in events:
+        link_md = f"[More Info]({e['link']})" if e['link'] else ""
         st.markdown(f"""
         **{e['name']}**  
-        📅 {e['date'].date()}  
         {e['description']}  
         {link_md}
         """)
