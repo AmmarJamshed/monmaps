@@ -294,7 +294,7 @@ place_markers = [{
 } for p in results_sorted if "geometry" in p]
 
 # ----------------------------
-# Map Rendering
+# Map Rendering (FIXED JS)
 # ----------------------------
 MAP_HTML = f"""
 <!DOCTYPE html>
@@ -331,7 +331,8 @@ MAP_HTML = f"""
         position:{{lat:e.lat,lng:e.lng}}, map, title:e.name,
         icon: e.icon
       }});
-      const html = `<b>${{e.name}}</b><br/>📅 ${e.date}<br/>${{e.addr}}<br/>` + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
+      const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/>` 
+                 + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
   </script></body>
