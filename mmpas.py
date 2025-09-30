@@ -99,7 +99,7 @@ def gmaps_place_link(place_id: str) -> str:
     return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
 
 # ----------------------------
-# Google scraping for events
+# Google scraping for events (fixed selectors + flexible)
 # ----------------------------
 def scrape_google_events(city: str, keyword: str, max_results: int = 12):
     query = f"{keyword} {city} training workshop certification site:.org OR site:.edu OR site:.pk"
@@ -119,7 +119,9 @@ def scrape_google_events(city: str, keyword: str, max_results: int = 12):
     for g in soup.select("div.g")[:max_results]:
         title_tag = g.select_one("h3")
         link_tag = g.select_one("a")
-        snippet_tag = g.select_one("span.aCOpRe")
+
+        # Google snippets may appear in different tags
+        snippet_tag = g.select_one("span.aCOpRe") or g.select_one("div.VwiC3b")
 
         if not title_tag or not link_tag:
             continue
@@ -148,9 +150,9 @@ def scrape_google_events(city: str, keyword: str, max_results: int = 12):
             "date": event_date
         })
 
-    future_events = [e for e in results if not e["date"] or e["date"] >= today]
-    future_events.sort(key=lambda x: (x["date"] is None, x["date"] or datetime.max.date()))
-    return future_events
+    # Keep all (future + unspecified)
+    results.sort(key=lambda x: (x["date"] is None, x["date"] or datetime.max.date()))
+    return results
 
 # ----------------------------
 # Sidebar controls
@@ -249,97 +251,11 @@ results_sorted = sorted(results, key=lambda p: (-p.get("rating", 0), -p.get("use
 with st.spinner("Scraping live Google events…"):
     events = scrape_google_events(city, extra_kw)
 
+# Debug: show raw events
+st.write("Raw events fetched:", len(events))
+st.json(events[:5])
+
 st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
-
-# ----------------------------
-# Event Markers with Colors
-# ----------------------------
-today = datetime.today().date()
-tomorrow = today + timedelta(days=1)
-
-event_markers = []
-for e in events:
-    geo = geocode_address(city)
-    if not geo:
-        continue
-    lat_ev, lng_ev, _ = geo
-
-    if e["date"] == today:
-        icon = "http://maps.google.com/mapfiles/ms/icons/green-dot.png"
-    elif e["date"] == tomorrow:
-        icon = "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
-    elif e["date"] and e["date"] > tomorrow:
-        icon = "http://maps.google.com/mapfiles/ms/icons/orange-dot.png"
-    else:
-        icon = "http://maps.google.com/mapfiles/ms/icons/grey-dot.png"
-
-    event_markers.append({
-        "lat": lat_ev, "lng": lng_ev,
-        "name": e["name"],
-        "addr": e.get("description", ""),
-        "date": e["date"].strftime("%Y-%m-%d") if e["date"] else "Unspecified",
-        "link": e.get("link", ""),
-        "icon": icon
-    })
-
-place_markers = [{
-    "lat": p["geometry"]["location"]["lat"],
-    "lng": p["geometry"]["location"]["lng"],
-    "name": p.get("name", "Untitled"),
-    "addr": p.get("vicinity") or p.get("formatted_address") or "",
-    "rating": p.get("rating", ""),
-    "total": p.get("user_ratings_total", ""),
-    "open": fmt_opening_hours(p.get("opening_hours", {})),
-    "link": gmaps_place_link(p.get("place_id", ""))
-} for p in results_sorted if "geometry" in p]
-
-# ----------------------------
-# Map Rendering (FIXED JS)
-# ----------------------------
-MAP_HTML = f"""
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <style>html, body, #map {{ height: 100%; margin: 0; padding: 0; }}</style>
-    <script src="https://maps.googleapis.com/maps/api/js?key={API_KEY}&libraries=places"></script>
-  </head>
-  <body><div id="map"></div>
-  <script>
-    const center = {{lat: {lat}, lng: {lng}}};
-    const map = new google.maps.Map(document.getElementById('map'), {{
-      center: center, zoom: {14 if radius_km<=5 else 12}, mapTypeControl:false
-    }});
-
-    new google.maps.Marker({{
-      position: center, map, title:"You are here",
-      icon:{{path:google.maps.SymbolPath.CIRCLE,scale:6,fillColor:"#2ecc71",fillOpacity:1,strokeWeight:2,strokeColor:"#1e824c"}}
-    }});
-
-    const infow = new google.maps.InfoWindow();
-
-    const places = {json.dumps(place_markers)};
-    places.forEach(m => {{
-      const mk = new google.maps.Marker({{position:{{lat:m.lat,lng:m.lng}},map,title:m.name}});
-      const html = `<b>${{m.name}}</b><br/>${{m.addr}}<br/>⭐ ${{m.rating}} (${{m.total}})<br/>${{m.open}}<br/><a href="${{m.link}}" target="_blank">Open in Google Maps</a>`;
-      mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
-    }});
-
-    const events = {json.dumps(event_markers)};
-    events.forEach(e => {{
-      const mk = new google.maps.Marker({{
-        position:{{lat:e.lat,lng:e.lng}}, map, title:e.name,
-        icon: e.icon
-      }});
-      const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/>` 
-                 + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
-      mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
-    }});
-  </script></body>
-</html>
-"""
-
-components.html(MAP_HTML, height=560, scrolling=False)
 
 # ----------------------------
 # Calendar-Style Event List
