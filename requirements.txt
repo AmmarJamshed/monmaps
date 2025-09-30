@@ -1,6 +1,7 @@
+lxml
 streamlit
+streamlit-autorefresh
+streamlit-geolocation
+pandas
 requests
 beautifulsoup4
-lxml
-pandas
-streamlit-geolocation
