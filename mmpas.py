@@ -5,19 +5,18 @@ from datetime import datetime, date, timedelta
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 from dateutil import parser
-import re
 
 # ----------------------------
 # Config
 # ----------------------------
 st.set_page_config(page_title="Nearby Training & Schools + Events", page_icon="🗺️", layout="wide")
 API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+EVENTBRITE_KEY = st.secrets.get("EVENTBRITE_API_KEY", "")
 
-if not API_KEY:
-    st.error("Add GOOGLE_MAPS_API_KEY in .streamlit/secrets.toml to run this app.")
+if not API_KEY or not EVENTBRITE_KEY:
+    st.error("Add GOOGLE_MAPS_API_KEY and EVENTBRITE_API_KEY in .streamlit/secrets.toml to run this app.")
     st.stop()
 
 # Auto-refresh control
@@ -99,58 +98,34 @@ def gmaps_place_link(place_id: str) -> str:
     return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
 
 # ----------------------------
-# Google scraping for events
+# Eventbrite for events
 # ----------------------------
-def scrape_google_events(city: str, keyword: str, max_results: int = 12):
-    query = f"{keyword} {city} training workshop certification site:.org OR site:.edu OR site:.pk"
-    url = "https://www.google.com/search"
-    params = {"q": query, "hl": "en"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/115.0 Safari/537.36"
+def fetch_eventbrite_events(city: str, max_results: int = 20):
+    url = "https://www.eventbriteapi.com/v3/events/search/"
+    headers = {"Authorization": f"Bearer {EVENTBRITE_KEY}"}
+    params = {
+        "location.address": city,
+        "sort_by": "date"
     }
-    r = requests.get(url, params=params, headers=headers, timeout=15)
-    soup = BeautifulSoup(r.text, "html.parser")
+    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    data = resp.json()
 
-    results = []
+    events = []
     today = datetime.today().date()
-
-    for g in soup.select("div.g")[:max_results]:
-        title_tag = g.select_one("h3")
-        link_tag = g.select_one("a")
-        snippet_tag = g.select_one("span.aCOpRe")
-
-        if not title_tag or not link_tag:
-            continue
-
-        title = title_tag.get_text(" ", strip=True)
-        snippet = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
-        link = link_tag["href"]
-
-        event_date = None
-        date_match = re.search(
-            r"(\d{1,2}\s+\w+\s+\d{4}|\d{1,2}\s+\w+|\w+\s+\d{1,2},?\s*\d{4}?)",
-            snippet, re.I
-        )
-        if date_match:
+    for ev in data.get("events", [])[:max_results]:
+        ev_date = None
+        if ev.get("start"):
             try:
-                parsed_date = parser.parse(date_match.group(0), fuzzy=True).date()
-                if parsed_date >= today:
-                    event_date = parsed_date
+                ev_date = parser.parse(ev["start"]["local"]).date()
             except:
                 pass
-
-        results.append({
-            "name": title,
-            "description": snippet,
-            "link": link,
-            "date": event_date
+        events.append({
+            "name": ev["name"]["text"],
+            "description": ev["description"]["text"] if ev.get("description") else "",
+            "link": ev["url"],
+            "date": ev_date
         })
-
-    future_events = [e for e in results if not e["date"] or e["date"] >= today]
-    future_events.sort(key=lambda x: (x["date"] is None, x["date"] or datetime.max.date()))
-    return future_events
+    return events
 
 # ----------------------------
 # Sidebar controls
@@ -194,44 +169,6 @@ selected = st.sidebar.multiselect(
     default=["training_like", "school", "university"]
 )
 
-st.sidebar.subheader("Search Focus")
-search_type = st.sidebar.radio("What are you looking for?", ["Trainings", "Academic Programs"])
-
-training_options = [
-    "Communication Training", "Data Science Training", "Cyber Security Training",
-    "App development Training", "IT Training", "Education training"
-]
-
-bsc_options = [
-    "BSc Data Science", "BSc IT", "BSc Communication", "BSc Cyber Security",
-    "BBA", "BSc Liberal Arts", "BSc Computer Science", "BSc Engineering"
-]
-
-msc_options = [
-    "MSc Data Science", "MSc IT", "MSc Communication", "MSc Cyber Security",
-    "MBA", "MA Business", "MSc Computer Science"
-]
-
-diploma_options = [
-    "Diploma in Data Science", "Diploma in IT", "Diploma in Communication",
-    "Diploma in Cyber Security", "Diploma in Business",
-    "Diploma in HR", "Diploma in Health"
-]
-
-if search_type == "Trainings":
-    selected_kw = st.sidebar.selectbox("Select Training Category", training_options)
-else:
-    program_type = st.sidebar.radio("Choose Program Type", ["BSc", "MSc", "Diploma"])
-    if program_type == "BSc":
-        selected_kw = st.sidebar.selectbox("Select BSc Program", bsc_options)
-    elif program_type == "MSc":
-        selected_kw = st.sidebar.selectbox("Select MSc Program", msc_options)
-    else:
-        selected_kw = st.sidebar.selectbox("Select Diploma", diploma_options)
-
-extra_kw = selected_kw
-max_pages = st.sidebar.select_slider("Pages per type", options=[1, 2], value=1)
-
 st.sidebar.subheader("Filter by Event Date")
 date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value=None)
 
@@ -239,15 +176,15 @@ date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value
 # Fetch Places + Events
 # ----------------------------
 st.title("Nearby Training & Schools + Live Events")
-st.caption("Google Places + Google Search events with auto-refresh and calendar filter.")
+st.caption("Google Places + Eventbrite events with auto-refresh and calendar filter.")
 
 with st.spinner("Fetching nearby places…"):
-    results = nearby_search(lat, lng, radius_m, selected, keyword=extra_kw.strip() or None, max_pages=max_pages)
+    results = nearby_search(lat, lng, radius_m, selected, keyword=None)
 
 results_sorted = sorted(results, key=lambda p: (-p.get("rating", 0), -p.get("user_ratings_total", 0)))
 
-with st.spinner("Scraping live Google events…"):
-    events = scrape_google_events(city, extra_kw)
+with st.spinner("Fetching live Eventbrite events…"):
+    events = fetch_eventbrite_events(city)
 
 st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
 
@@ -294,7 +231,7 @@ place_markers = [{
 } for p in results_sorted if "geometry" in p]
 
 # ----------------------------
-# Map Rendering (FIXED JS)
+# Map Rendering (with events)
 # ----------------------------
 MAP_HTML = f"""
 <!DOCTYPE html>
@@ -333,12 +270,11 @@ MAP_HTML = f"""
       }});
       const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/>` 
                  + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
-      mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
+      mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});  
     }});
   </script></body>
 </html>
 """
-
 components.html(MAP_HTML, height=560, scrolling=False)
 
 # ----------------------------
