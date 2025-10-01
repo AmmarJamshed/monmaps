@@ -176,7 +176,7 @@ date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value
 # Fetch Places + Events
 # ----------------------------
 st.title("Nearby Training & Schools + Live Events")
-st.caption("Google Places + Eventbrite events with auto-refresh and calendar filter.")
+st.caption("Google Places for institutions + Eventbrite for live events in the city.")
 
 with st.spinner("Fetching nearby places…"):
     results = nearby_search(lat, lng, radius_m, selected, keyword=None)
@@ -189,36 +189,8 @@ with st.spinner("Fetching live Eventbrite events…"):
 st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
 
 # ----------------------------
-# Event Markers with Colors
+# Place Markers on Map
 # ----------------------------
-today = datetime.today().date()
-tomorrow = today + timedelta(days=1)
-
-event_markers = []
-for e in events:
-    geo = geocode_address(city)
-    if not geo:
-        continue
-    lat_ev, lng_ev, _ = geo
-
-    if e["date"] == today:
-        icon = "http://maps.google.com/mapfiles/ms/icons/green-dot.png"
-    elif e["date"] == tomorrow:
-        icon = "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
-    elif e["date"] and e["date"] > tomorrow:
-        icon = "http://maps.google.com/mapfiles/ms/icons/orange-dot.png"
-    else:
-        icon = "http://maps.google.com/mapfiles/ms/icons/grey-dot.png"
-
-    event_markers.append({
-        "lat": lat_ev, "lng": lng_ev,
-        "name": e["name"],
-        "addr": e.get("description", ""),
-        "date": e["date"].strftime("%Y-%m-%d") if e["date"] else "Unspecified",
-        "link": e.get("link", ""),
-        "icon": icon
-    })
-
 place_markers = [{
     "lat": p["geometry"]["location"]["lat"],
     "lng": p["geometry"]["location"]["lng"],
@@ -230,9 +202,6 @@ place_markers = [{
     "link": gmaps_place_link(p.get("place_id", ""))
 } for p in results_sorted if "geometry" in p]
 
-# ----------------------------
-# Map Rendering (with events)
-# ----------------------------
 MAP_HTML = f"""
 <!DOCTYPE html>
 <html>
@@ -261,26 +230,15 @@ MAP_HTML = f"""
       const html = `<b>${{m.name}}</b><br/>${{m.addr}}<br/>⭐ ${{m.rating}} (${{m.total}})<br/>${{m.open}}<br/><a href="${{m.link}}" target="_blank">Open in Google Maps</a>`;
       mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
     }});
-
-    const events = {json.dumps(event_markers)};
-    events.forEach(e => {{
-      const mk = new google.maps.Marker({{
-        position:{{lat:e.lat,lng:e.lng}}, map, title:e.name,
-        icon: e.icon
-      }});
-      const html = `<b>${{e.name}}</b><br/>📅 ${{e.date}}<br/>${{e.addr}}<br/>` 
-                 + (e.link ? `<a href="${{e.link}}" target="_blank">More info</a>` : "");
-      mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});  
-    }});
   </script></body>
 </html>
 """
 components.html(MAP_HTML, height=560, scrolling=False)
 
 # ----------------------------
-# Calendar-Style Event List
+# Event List (Below Map)
 # ----------------------------
-st.subheader("Live & Upcoming Events (Calendar View)")
+st.subheader("Live & Upcoming Events in the City")
 
 if not events:
     st.info("No upcoming events found.")
