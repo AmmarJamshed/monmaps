@@ -1,6 +1,6 @@
 import json
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 
 import requests
 import streamlit as st
@@ -13,10 +13,10 @@ from dateutil import parser
 # ----------------------------
 st.set_page_config(page_title="Nearby Training & Schools + Events", page_icon="🗺️", layout="wide")
 API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
-EVENTBRITE_KEY = st.secrets.get("EVENTBRITE_API_KEY", "")
+TICKETMASTER_KEY = st.secrets.get("TICKETMASTER_API_KEY", "")
 
-if not API_KEY or not EVENTBRITE_KEY:
-    st.error("Add GOOGLE_MAPS_API_KEY and EVENTBRITE_API_KEY in .streamlit/secrets.toml to run this app.")
+if not API_KEY or not TICKETMASTER_KEY:
+    st.error("Add GOOGLE_MAPS_API_KEY and TICKETMASTER_API_KEY in .streamlit/secrets.toml to run this app.")
     st.stop()
 
 # Auto-refresh control
@@ -98,34 +98,35 @@ def gmaps_place_link(place_id: str) -> str:
     return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
 
 # ----------------------------
-# Eventbrite for events (with lat/lon)
+# Ticketmaster for events (city only)
 # ----------------------------
-def fetch_eventbrite_events(city: str, lat: float, lng: float, radius_km: int = 15, max_results: int = 20):
-    url = "https://www.eventbriteapi.com/v3/events/search/"
-    headers = {"Authorization": f"Bearer {EVENTBRITE_KEY}"}
+def fetch_ticketmaster_events(city: str, max_results: int = 20):
+    url = "https://app.ticketmaster.com/discovery/v2/events.json"
     params = {
-        "location.latitude": lat,
-        "location.longitude": lng,
-        "location.within": f"{radius_km}km",   # ✅ use radius around city center
-        "sort_by": "date"
+        "apikey": TICKETMASTER_KEY,
+        "city": city,
+        "size": max_results,
+        "sort": "date,asc"
     }
-    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    resp = requests.get(url, params=params, timeout=15)
     data = resp.json()
 
     events = []
     today = datetime.today().date()
-    for ev in data.get("events", [])[:max_results]:
+    for ev in data.get("_embedded", {}).get("events", []):
         ev_date = None
-        if ev.get("start"):
+        if ev.get("dates", {}).get("start", {}).get("localDate"):
             try:
-                ev_date = parser.parse(ev["start"]["local"]).date()
+                ev_date = parser.parse(ev["dates"]["start"]["localDate"]).date()
             except:
                 pass
+        venues = ev.get("_embedded", {}).get("venues", [])
         events.append({
-            "name": ev["name"]["text"],
-            "description": ev["description"]["text"] if ev.get("description") else "",
-            "link": ev["url"],
-            "date": ev_date
+            "name": ev.get("name"),
+            "description": ev.get("info", "") or ev.get("pleaseNote", ""),
+            "link": ev.get("url", ""),
+            "date": ev_date,
+            "venue": venues[0].get("name") if venues else ""
         })
     return events
 
@@ -178,15 +179,15 @@ date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value
 # Fetch Places + Events
 # ----------------------------
 st.title("Nearby Training & Schools + Live Events")
-st.caption("Google Places for institutions + Eventbrite for live events in the selected area.")
+st.caption("Google Places for institutions + Ticketmaster for live events in the selected city.")
 
 with st.spinner("Fetching nearby places…"):
     results = nearby_search(lat, lng, radius_m, selected, keyword=None)
 
 results_sorted = sorted(results, key=lambda p: (-p.get("rating", 0), -p.get("user_ratings_total", 0)))
 
-with st.spinner("Fetching live Eventbrite events…"):
-    events = fetch_eventbrite_events(city, lat, lng, radius_km)
+with st.spinner("Fetching live Ticketmaster events…"):
+    events = fetch_ticketmaster_events(city)
 
 st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
 
@@ -264,8 +265,10 @@ else:
                 current_date = "Unspecified"
 
             link_md = f"[More Info]({e['link']})" if e['link'] else ""
+            venue = f"📍 {e['venue']}" if e.get("venue") else ""
             st.markdown(f"""
             **{e['name']}**  
             {e['description']}  
+            {venue}  
             {link_md}
             """)
