@@ -98,13 +98,15 @@ def gmaps_place_link(place_id: str) -> str:
     return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
 
 # ----------------------------
-# Eventbrite for events
+# Eventbrite for events (with lat/lon)
 # ----------------------------
-def fetch_eventbrite_events(city: str, max_results: int = 20):
+def fetch_eventbrite_events(city: str, lat: float, lng: float, radius_km: int = 15, max_results: int = 20):
     url = "https://www.eventbriteapi.com/v3/events/search/"
     headers = {"Authorization": f"Bearer {EVENTBRITE_KEY}"}
     params = {
-        "location.address": city,
+        "location.latitude": lat,
+        "location.longitude": lng,
+        "location.within": f"{radius_km}km",   # ✅ use radius around city center
         "sort_by": "date"
     }
     resp = requests.get(url, headers=headers, params=params, timeout=15)
@@ -143,7 +145,7 @@ if HAS_GEO:
             st.success(f"Got device location: {lat:.5f}, {lng:.5f}")
 
 with st.sidebar.expander("🔎 Or search by city/area", expanded=not got_loc):
-    city = st.text_input("City", value="Islamabad")
+    city = st.text_input("City", value="New York")
     area = st.text_input("Area / Locality (optional)", value="")
     if st.button("Locate"):
         query = f"{area}, {city}" if area else city
@@ -159,7 +161,7 @@ if not got_loc:
     lat, lng = 33.6844, 73.0479
     city = "Islamabad"
 
-radius_km = st.sidebar.slider("Radius (km)", 1, 15, 3)
+radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
 radius_m = radius_km * 1000
 
 st.sidebar.subheader("Categories")
@@ -176,7 +178,7 @@ date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value
 # Fetch Places + Events
 # ----------------------------
 st.title("Nearby Training & Schools + Live Events")
-st.caption("Google Places for institutions + Eventbrite for live events in the city.")
+st.caption("Google Places for institutions + Eventbrite for live events in the selected area.")
 
 with st.spinner("Fetching nearby places…"):
     results = nearby_search(lat, lng, radius_m, selected, keyword=None)
@@ -184,7 +186,7 @@ with st.spinner("Fetching nearby places…"):
 results_sorted = sorted(results, key=lambda p: (-p.get("rating", 0), -p.get("user_ratings_total", 0)))
 
 with st.spinner("Fetching live Eventbrite events…"):
-    events = fetch_eventbrite_events(city)
+    events = fetch_eventbrite_events(city, lat, lng, radius_km)
 
 st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
 
