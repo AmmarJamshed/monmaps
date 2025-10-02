@@ -12,19 +12,18 @@ from dateutil import parser
 # Config
 # ----------------------------
 st.set_page_config(page_title="Nearby Training & Schools + Events", page_icon="🗺️", layout="wide")
-API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
 TICKETMASTER_KEY = st.secrets.get("TICKETMASTER_API_KEY", "")
 
-if not API_KEY or not TICKETMASTER_KEY:
-    st.error("Add GOOGLE_MAPS_API_KEY and TICKETMASTER_API_KEY in .streamlit/secrets.toml to run this app.")
+if not TICKETMASTER_KEY:
+    st.error("Add TICKETMASTER_API_KEY in .streamlit/secrets.toml to run this app.")
     st.stop()
 
-# Auto-refresh control
+# Auto-refresh
 refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5)
 st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
 
 # ----------------------------
-# Geolocation support
+# Geolocation support (fallback to manual input)
 # ----------------------------
 try:
     from streamlit_geolocation import geolocation
@@ -32,73 +31,55 @@ try:
 except Exception:
     HAS_GEO = False
 
-CATEGORIES = {
-    "school": "Schools",
-    "university": "Universities",
-    "secondary_school": "Secondary Schools",
-    "primary_school": "Primary Schools",
-    "library": "Libraries",
-}
-
-TRAINING_KEYWORDS = [
-    "training center", "academy", "bootcamp", "coaching center",
-    "institute", "skill development", "IELTS", "Data Science", "Python"
-]
-
 # ----------------------------
-# Google API helpers
+# OSM Geocoding
 # ----------------------------
 def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {"address": addr, "key": API_KEY}
-    r = requests.get(url, params=params, timeout=15)
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": addr, "format": "json", "limit": 1}
+    r = requests.get(url, params=params, headers={"User-Agent": "streamlit-app"})
     data = r.json()
-    if data.get("status") != "OK" or not data.get("results"):
+    if not data:
         return None
-    res = data["results"][0]
-    loc = res["geometry"]["location"]
-    return (loc["lat"], loc["lng"], res.get("formatted_address", addr))
-
-def nearby_search(lat: float, lng: float, radius_m: int, types: List[str], keyword: Optional[str] = None, max_pages: int = 1) -> List[Dict]:
-    all_results: Dict[str, Dict] = {}
-    base = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-
-    def one_call(params: Dict) -> None:
-        nonlocal all_results
-        resp = requests.get(base, params=params, timeout=15)
-        payload = resp.json()
-        if payload.get("status") not in ("OK", "ZERO_RESULTS"):
-            return
-        for pl in payload.get("results", []):
-            pid = pl.get("place_id")
-            if pid and pid not in all_results:
-                all_results[pid] = pl
-
-    for t in types:
-        params = {"key": API_KEY, "location": f"{lat},{lng}", "radius": radius_m, "type": t}
-        if keyword:
-            params["keyword"] = keyword
-        one_call(params)
-
-    if "training_like" in types:
-        for kw in ([keyword] if keyword else TRAINING_KEYWORDS):
-            if not kw:
-                continue
-            params = {"key": API_KEY, "location": f"{lat},{lng}", "radius": radius_m, "type": "establishment", "keyword": kw}
-            one_call(params)
-
-    return list(all_results.values())
-
-def fmt_opening_hours(ph: Dict) -> str:
-    if not ph:
-        return ""
-    return "Open now" if ph.get("open_now") else "Closed now"
-
-def gmaps_place_link(place_id: str) -> str:
-    return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+    res = data[0]
+    return (float(res["lat"]), float(res["lon"]), res.get("display_name", addr))
 
 # ----------------------------
-# Ticketmaster for events (city only)
+# OSM Places (Overpass API)
+# ----------------------------
+def osm_places(lat: float, lng: float, radius_m: int, keywords: List[str]):
+    query = f"""
+    [out:json];
+    (
+      node(around:{radius_m},{lat},{lng})[amenity];
+      way(around:{radius_m},{lat},{lng})[amenity];
+      relation(around:{radius_m},{lat},{lng})[amenity];
+    );
+    out center 20;
+    """
+    resp = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, timeout=25)
+    data = resp.json()
+
+    places = []
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        name = tags.get("name", "Unnamed")
+        amenity = tags.get("amenity", "")
+        lat_p = el.get("lat") or el.get("center", {}).get("lat")
+        lon_p = el.get("lon") or el.get("center", {}).get("lon")
+
+        if any(kw.lower() in name.lower() or kw.lower() in amenity.lower() for kw in keywords):
+            places.append({
+                "name": name,
+                "amenity": amenity,
+                "lat": lat_p,
+                "lng": lon_p,
+                "addr": tags.get("addr:full", tags.get("addr:street", "")),
+            })
+    return places
+
+# ----------------------------
+# Ticketmaster Events
 # ----------------------------
 def fetch_ticketmaster_events(city: str, max_results: int = 20):
     url = "https://app.ticketmaster.com/discovery/v2/events.json"
@@ -126,14 +107,16 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
             "description": ev.get("info", "") or ev.get("pleaseNote", ""),
             "link": ev.get("url", ""),
             "date": ev_date,
-            "venue": venues[0].get("name") if venues else ""
+            "venue": venues[0].get("name") if venues else "",
+            "lat": float(venues[0]["location"]["latitude"]) if venues and "location" in venues[0] else None,
+            "lng": float(venues[0]["location"]["longitude"]) if venues and "location" in venues[0] else None,
         })
     return events
 
 # ----------------------------
-# Sidebar controls
+# Sidebar
 # ----------------------------
-st.sidebar.header("Find Nearby (Google)")
+st.sidebar.header("Find Nearby (OpenStreetMap)")
 lat = lng = None
 got_loc = False
 
@@ -165,83 +148,79 @@ if not got_loc:
 radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
 radius_m = radius_km * 1000
 
-st.sidebar.subheader("Categories")
-selected = st.sidebar.multiselect(
-    "Choose categories",
-    options=["training_like"] + list(CATEGORIES.keys()),
-    default=["training_like", "school", "university"]
+keywords = st.sidebar.multiselect(
+    "Search for (amenities/keywords)",
+    options=["school", "university", "college", "library", "training", "academy", "institute"],
+    default=["school", "university", "academy"]
 )
 
 st.sidebar.subheader("Filter by Event Date")
 date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value=None)
 
 # ----------------------------
-# Fetch Places + Events
+# Fetch Data
 # ----------------------------
-st.title("Nearby Training & Schools + Live Events")
-st.caption("Google Places for institutions + Ticketmaster for live events in the selected city.")
+st.title("Nearby Training & Schools + Live Events (OpenStreetMap + Ticketmaster)")
 
-with st.spinner("Fetching nearby places…"):
-    results = nearby_search(lat, lng, radius_m, selected, keyword=None)
-
-results_sorted = sorted(results, key=lambda p: (-p.get("rating", 0), -p.get("user_ratings_total", 0)))
+with st.spinner("Fetching nearby places (OSM)…"):
+    results = osm_places(lat, lng, radius_m, keywords)
 
 with st.spinner("Fetching live Ticketmaster events…"):
     events = fetch_ticketmaster_events(city)
 
-st.subheader(f"Found {len(results_sorted)} places and {len(events)} upcoming events")
+st.subheader(f"Found {len(results)} places and {len(events)} upcoming events")
 
 # ----------------------------
-# Place Markers on Map
+# Map with Leaflet + OSM
 # ----------------------------
-place_markers = [{
-    "lat": p["geometry"]["location"]["lat"],
-    "lng": p["geometry"]["location"]["lng"],
-    "name": p.get("name", "Untitled"),
-    "addr": p.get("vicinity") or p.get("formatted_address") or "",
-    "rating": p.get("rating", ""),
-    "total": p.get("user_ratings_total", ""),
-    "open": fmt_opening_hours(p.get("opening_hours", {})),
-    "link": gmaps_place_link(p.get("place_id", ""))
-} for p in results_sorted if "geometry" in p]
-
-MAP_HTML = f"""
+map_html = f"""
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <style>html, body, #map {{ height: 100%; margin: 0; padding: 0; }}</style>
-    <script src="https://maps.googleapis.com/maps/api/js?key={API_KEY}&libraries=places"></script>
-  </head>
-  <body><div id="map"></div>
-  <script>
-    const center = {{lat: {lat}, lng: {lng}}};
-    const map = new google.maps.Map(document.getElementById('map'), {{
-      center: center, zoom: {14 if radius_km<=5 else 12}, mapTypeControl:false
-    }});
+<head>
+  <meta charset="utf-8" />
+  <title>Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <style>html, body, #map {{ height: 100%; margin:0; padding:0; }}</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+  var map = L.map('map').setView([{lat}, {lng}], {14 if radius_km<=5 else 12});
+  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    attribution: '© OpenStreetMap contributors'
+  }}).addTo(map);
 
-    new google.maps.Marker({{
-      position: center, map, title:"You are here",
-      icon:{{path:google.maps.SymbolPath.CIRCLE,scale:6,fillColor:"#2ecc71",fillOpacity:1,strokeWeight:2,strokeColor:"#1e824c"}}
-    }});
+  var places = {json.dumps(results)};
+  places.forEach(function(p) {{
+    if (p.lat && p.lng) {{
+      var marker = L.marker([p.lat, p.lng]).addTo(map);
+      marker.bindPopup("<b>" + p.name + "</b><br/>" + p.addr + "<br/>Amenity: " + p.amenity);
+    }}
+  }});
 
-    const infow = new google.maps.InfoWindow();
-
-    const places = {json.dumps(place_markers)};
-    places.forEach(m => {{
-      const mk = new google.maps.Marker({{position:{{lat:m.lat,lng:m.lng}},map,title:m.name}});
-      const html = `<b>${{m.name}}</b><br/>${{m.addr}}<br/>⭐ ${{m.rating}} (${{m.total}})<br/>${{m.open}}<br/><a href="${{m.link}}" target="_blank">Open in Google Maps</a>`;
-      mk.addListener('click',()=>{{infow.setContent(html);infow.open({{anchor:mk,map}});}});
-    }});
-  </script></body>
+  var events = {json.dumps(events)};
+  events.forEach(function(e) {{
+    if (e.lat && e.lng) {{
+      var marker = L.marker([e.lat, e.lng], {{icon: L.icon({{
+        iconUrl: 'https://maps.gstatic.com/mapfiles/ms2/micons/orange-dot.png',
+        iconSize: [25, 41], iconAnchor: [12, 41]
+      }})}}).addTo(map);
+      marker.bindPopup("<b>" + e.name + "</b><br/>📅 " + (e.date || 'Unspecified') + "<br/>" + e.venue + "<br/><a href='" + e.link + "' target='_blank'>More Info</a>");
+    }}
+  }});
+</script>
+</body>
 </html>
 """
-components.html(MAP_HTML, height=560, scrolling=False)
+
+components.html(map_html, height=560, scrolling=False)
 
 # ----------------------------
-# Event List (Below Map)
+# Event List
 # ----------------------------
-st.subheader("Live & Upcoming Events in the City")
+st.subheader("Live & Upcoming Events")
 
 if not events:
     st.info("No upcoming events found.")
@@ -254,20 +233,12 @@ else:
     if not filtered_events:
         st.warning("No events found for this date.")
     else:
-        current_date = None
         for e in filtered_events:
-            if e["date"] and e["date"] != current_date:
-                st.markdown(f"### 📅 {e['date'].strftime('%A, %d %B %Y')}")
-                current_date = e["date"]
-
-            if not e["date"] and current_date != "Unspecified":
-                st.markdown("### ❓ Unspecified Date")
-                current_date = "Unspecified"
-
             link_md = f"[More Info]({e['link']})" if e['link'] else ""
             venue = f"📍 {e['venue']}" if e.get("venue") else ""
             st.markdown(f"""
             **{e['name']}**  
+            📅 {e['date'] if e['date'] else "Unspecified"}  
             {e['description']}  
             {venue}  
             {link_md}
