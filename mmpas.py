@@ -31,6 +31,8 @@ if "lng" not in st.session_state:
     st.session_state.lng = 73.0479
 if "city" not in st.session_state:
     st.session_state.city = "Islamabad"
+if "country" not in st.session_state:
+    st.session_state.country = "pk"   # Default Pakistan
 
 # ----------------------------
 # Geolocation support (optional)
@@ -42,11 +44,17 @@ except Exception:
     HAS_GEO = False
 
 # ----------------------------
-# OSM Geocoding (always English)
+# OSM Geocoding (always English, country-restricted)
 # ----------------------------
-def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
+def geocode_address(addr: str, country: str = "pk") -> Optional[Tuple[float, float, str]]:
     url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": addr, "format": "json", "limit": 1, "accept-language": "en"}
+    params = {
+        "q": addr,
+        "format": "json",
+        "limit": 1,
+        "accept-language": "en",
+        "countrycodes": country.lower()
+    }
     r = requests.get(url, params=params, headers={"User-Agent": "streamlit-app"})
     data = r.json()
     if not data:
@@ -115,7 +123,6 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
             "name": ev.get("name"),
             "description": ev.get("info", "") or ev.get("pleaseNote", ""),
             "link": ev.get("url", ""),
-            # Always serialize date as string
             "date": ev_date.isoformat() if ev_date else None,
             "venue": venues[0].get("name") if venues else "",
             "lat": float(venues[0]["location"]["latitude"]) if venues and "location" in venues[0] else None,
@@ -127,6 +134,19 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
 # Sidebar
 # ----------------------------
 st.sidebar.header("Find Nearby (OpenStreetMap)")
+
+# 🌍 Country Selector
+country_codes = {
+    "Pakistan": "pk",
+    "United States": "us",
+    "United Kingdom": "gb",
+    "India": "in",
+    "Canada": "ca",
+    "Australia": "au"
+}
+selected_country = st.sidebar.selectbox("Select Country", list(country_codes.keys()),
+                                        index=list(country_codes.values()).index(st.session_state.country))
+st.session_state.country = country_codes[selected_country]
 
 if HAS_GEO:
     with st.sidebar.expander("📍 Use my device location", expanded=False):
@@ -141,7 +161,7 @@ with st.sidebar.expander("🔎 Or search by city/area", expanded=False):
     area = st.text_input("Area / Locality (optional)", value="")
     if st.button("Locate"):
         query = f"{area}, {city_input}" if area else city_input
-        out = geocode_address(query)
+        out = geocode_address(query, country=st.session_state.country)
         if out:
             st.session_state.lat, st.session_state.lng, faddr = out
             st.session_state.city = city_input
