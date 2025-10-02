@@ -97,13 +97,13 @@ def osm_places(lat: float, lng: float, radius_m: int, keywords: List[str]):
     return places
 
 # ----------------------------
-# Ticketmaster Events
+# Ticketmaster Events (city only)
 # ----------------------------
 def fetch_ticketmaster_events(city: str, max_results: int = 20):
     url = "https://app.ticketmaster.com/discovery/v2/events.json"
     params = {
         "apikey": TICKETMASTER_KEY,
-        "city": city,
+        "city": city,   # ✅ only city goes to Ticketmaster
         "size": max_results,
         "sort": "date,asc"
     }
@@ -164,7 +164,8 @@ with st.sidebar.expander("🔎 Or search by city/area", expanded=False):
         out = geocode_address(query, country=st.session_state.country)
         if out:
             st.session_state.lat, st.session_state.lng, faddr = out
-            st.session_state.city = city_input
+            # ✅ Only keep clean city name for Ticketmaster
+            st.session_state.city = city_input.strip().split(",")[0]
             st.success(f"Centered to: {faddr}")
         else:
             st.error("Could not find that location.")
@@ -191,10 +192,10 @@ st.title("Nearby Training & Schools + Live Events (OpenStreetMap + Ticketmaster)
 with st.spinner("Fetching nearby places (OSM)…"):
     results = osm_places(lat, lng, radius_m, keywords)
 
-with st.spinner("Fetching live Ticketmaster events…"):
+with st.spinner(f"Fetching live Ticketmaster events for {city}…"):
     events = fetch_ticketmaster_events(city)
 
-st.subheader(f"Found {len(results)} places and {len(events)} upcoming events")
+st.subheader(f"Found {len(results)} places and {len(events)} upcoming events in {city}")
 
 # ----------------------------
 # Map with Leaflet + OSM
@@ -246,10 +247,10 @@ components.html(map_html, height=560, scrolling=False)
 # ----------------------------
 # Event List
 # ----------------------------
-st.subheader("Live & Upcoming Events")
+st.subheader(f"Live & Upcoming Events in {city}")
 
 if not events:
-    st.info("No upcoming events found.")
+    st.info(f"No upcoming events found for {city}.")
 else:
     if date_filter:
         filtered_events = [e for e in events if e["date"] and e["date"] == date_filter.isoformat()]
@@ -257,7 +258,7 @@ else:
         filtered_events = events
 
     if not filtered_events:
-        st.warning("No events found for this date.")
+        st.warning(f"No events found in {city} for this date.")
     else:
         for e in filtered_events:
             link_md = f"[More Info]({e['link']})" if e['link'] else ""
