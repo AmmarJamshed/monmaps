@@ -5,3 +5,4 @@ streamlit-geolocation
 pandas
 requests
 beautifulsoup4
+python-dateutil
