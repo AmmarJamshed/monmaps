@@ -164,8 +164,9 @@ with st.sidebar.expander("🔎 Or search by city/area", expanded=False):
         out = geocode_address(query, country=st.session_state.country)
         if out:
             st.session_state.lat, st.session_state.lng, faddr = out
-            # ✅ Only keep clean city name for Ticketmaster
-            st.session_state.city = city_input.strip().split(",")[0]
+            # ✅ Normalize for Ticketmaster
+            clean_city = city_input.strip().split(",")[0]
+            st.session_state.city = clean_city.title()
             st.success(f"Centered to: {faddr}")
         else:
             st.error("Could not find that location.")
@@ -193,7 +194,7 @@ with st.spinner("Fetching nearby places (OSM)…"):
     results = osm_places(lat, lng, radius_m, keywords)
 
 with st.spinner(f"Fetching live Ticketmaster events for {city}…"):
-    events = fetch_ticketmaster_events(city)
+    events = fetch_ticketmaster_events(st.session_state.city.title())
 
 st.subheader(f"Found {len(results)} places and {len(events)} upcoming events in {city}")
 
