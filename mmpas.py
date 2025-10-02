@@ -1,6 +1,6 @@
 import json
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import requests
 import streamlit as st
@@ -42,11 +42,11 @@ except Exception:
     HAS_GEO = False
 
 # ----------------------------
-# OSM Geocoding
+# OSM Geocoding (always English)
 # ----------------------------
 def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
     url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": addr, "format": "json", "limit": 1}
+    params = {"q": addr, "format": "json", "limit": 1, "accept-language": "en"}
     r = requests.get(url, params=params, headers={"User-Agent": "streamlit-app"})
     data = r.json()
     if not data:
@@ -115,7 +115,7 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
             "name": ev.get("name"),
             "description": ev.get("info", "") or ev.get("pleaseNote", ""),
             "link": ev.get("url", ""),
-            # Convert to string for JSON serialization
+            # Always serialize date as string
             "date": ev_date.isoformat() if ev_date else None,
             "venue": venues[0].get("name") if venues else "",
             "lat": float(venues[0]["location"]["latitude"]) if venues and "location" in venues[0] else None,
