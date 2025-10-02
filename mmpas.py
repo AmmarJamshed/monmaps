@@ -23,7 +23,17 @@ refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5
 st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
 
 # ----------------------------
-# Geolocation support (fallback to manual input)
+# Session State for persistence
+# ----------------------------
+if "lat" not in st.session_state:
+    st.session_state.lat = 33.6844   # Default Islamabad
+if "lng" not in st.session_state:
+    st.session_state.lng = 73.0479
+if "city" not in st.session_state:
+    st.session_state.city = "Islamabad"
+
+# ----------------------------
+# Geolocation support (optional)
 # ----------------------------
 try:
     from streamlit_geolocation import geolocation
@@ -93,7 +103,6 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
     data = resp.json()
 
     events = []
-    today = datetime.today().date()
     for ev in data.get("_embedded", {}).get("events", []):
         ev_date = None
         if ev.get("dates", {}).get("start", {}).get("localDate"):
@@ -106,7 +115,8 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
             "name": ev.get("name"),
             "description": ev.get("info", "") or ev.get("pleaseNote", ""),
             "link": ev.get("url", ""),
-            "date": ev_date,
+            # Convert to string for JSON serialization
+            "date": ev_date.isoformat() if ev_date else None,
             "venue": venues[0].get("name") if venues else "",
             "lat": float(venues[0]["location"]["latitude"]) if venues and "location" in venues[0] else None,
             "lng": float(venues[0]["location"]["longitude"]) if venues and "location" in venues[0] else None,
@@ -117,33 +127,27 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
 # Sidebar
 # ----------------------------
 st.sidebar.header("Find Nearby (OpenStreetMap)")
-lat = lng = None
-got_loc = False
 
 if HAS_GEO:
     with st.sidebar.expander("📍 Use my device location", expanded=False):
         loc = geolocation()
         if loc and "latitude" in loc and "longitude" in loc:
-            lat = float(loc["latitude"]); lng = float(loc["longitude"])
-            got_loc = True
-            st.success(f"Got device location: {lat:.5f}, {lng:.5f}")
+            st.session_state.lat = float(loc["latitude"])
+            st.session_state.lng = float(loc["longitude"])
+            st.success(f"Got device location: {st.session_state.lat:.5f}, {st.session_state.lng:.5f}")
 
-with st.sidebar.expander("🔎 Or search by city/area", expanded=not got_loc):
-    city = st.text_input("City", value="New York")
+with st.sidebar.expander("🔎 Or search by city/area", expanded=False):
+    city_input = st.text_input("City", value=st.session_state.city)
     area = st.text_input("Area / Locality (optional)", value="")
     if st.button("Locate"):
-        query = f"{area}, {city}" if area else city
+        query = f"{area}, {city_input}" if area else city_input
         out = geocode_address(query)
         if out:
-            lat, lng, faddr = out
+            st.session_state.lat, st.session_state.lng, faddr = out
+            st.session_state.city = city_input
             st.success(f"Centered to: {faddr}")
-            got_loc = True
         else:
             st.error("Could not find that location.")
-
-if not got_loc:
-    lat, lng = 33.6844, 73.0479
-    city = "Islamabad"
 
 radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
 radius_m = radius_km * 1000
@@ -160,6 +164,8 @@ date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value
 # ----------------------------
 # Fetch Data
 # ----------------------------
+lat, lng, city = st.session_state.lat, st.session_state.lng, st.session_state.city
+
 st.title("Nearby Training & Schools + Live Events (OpenStreetMap + Ticketmaster)")
 
 with st.spinner("Fetching nearby places (OSM)…"):
@@ -192,22 +198,22 @@ map_html = f"""
     attribution: '© OpenStreetMap contributors'
   }}).addTo(map);
 
-  var places = {json.dumps(results)};
+  var places = {json.dumps(results, default=str)};
   places.forEach(function(p) {{
     if (p.lat && p.lng) {{
       var marker = L.marker([p.lat, p.lng]).addTo(map);
-      marker.bindPopup("<b>" + p.name + "</b><br/>" + p.addr + "<br/>Amenity: " + p.amenity);
+      marker.bindPopup("<b>" + p.name + "</b><br/>" + (p.addr || "") + "<br/>Amenity: " + (p.amenity || ""));
     }}
   }});
 
-  var events = {json.dumps(events)};
+  var events = {json.dumps(events, default=str)};
   events.forEach(function(e) {{
     if (e.lat && e.lng) {{
       var marker = L.marker([e.lat, e.lng], {{icon: L.icon({{
         iconUrl: 'https://maps.gstatic.com/mapfiles/ms2/micons/orange-dot.png',
         iconSize: [25, 41], iconAnchor: [12, 41]
       }})}}).addTo(map);
-      marker.bindPopup("<b>" + e.name + "</b><br/>📅 " + (e.date || 'Unspecified') + "<br/>" + e.venue + "<br/><a href='" + e.link + "' target='_blank'>More Info</a>");
+      marker.bindPopup("<b>" + e.name + "</b><br/>📅 " + (e.date || 'Unspecified') + "<br/>" + (e.venue || "") + "<br/><a href='" + e.link + "' target='_blank'>More Info</a>");
     }}
   }});
 </script>
@@ -226,7 +232,7 @@ if not events:
     st.info("No upcoming events found.")
 else:
     if date_filter:
-        filtered_events = [e for e in events if e["date"] and e["date"] == date_filter]
+        filtered_events = [e for e in events if e["date"] and e["date"] == date_filter.isoformat()]
     else:
         filtered_events = events
 
