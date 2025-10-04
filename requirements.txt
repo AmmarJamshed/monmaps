@@ -6,3 +6,5 @@ pandas
 requests
 beautifulsoup4
 python-dateutil
+langchain
+openai
