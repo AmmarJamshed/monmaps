@@ -1,6 +1,6 @@
 import json
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -23,7 +23,7 @@ refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5
 st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
 
 # ----------------------------
-# Geolocation & Categories
+# Geolocation Support
 # ----------------------------
 try:
     from streamlit_geolocation import geolocation
@@ -37,22 +37,36 @@ TRAINING_KEYWORDS = [
 ]
 
 # ----------------------------
-# OpenStreetMap geocode helper
+# Safe OpenStreetMap Geocoding
 # ----------------------------
 def geocode_address(addr: str, country: Optional[str] = None) -> Optional[Tuple[float, float, str]]:
+    """Safely geocode using OpenStreetMap (Nominatim)"""
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": addr, "format": "json", "limit": 1}
     if country:
         params["country"] = country
-    r = requests.get(url, params=params, timeout=15, headers={"User-Agent": "MonMapsApp"})
-    data = r.json()
-    if not data:
+
+    try:
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent": "MonMapsApp"})
+        r.raise_for_status()
+        data = r.json()
+        if not data or not isinstance(data, list):
+            return None
+
+        loc = data[0]
+        lat = float(loc.get("lat"))
+        lon = float(loc.get("lon"))
+        display_name = loc.get("display_name", addr)
+        return lat, lon, display_name
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error while contacting OpenStreetMap: {e}")
         return None
-    loc = data[0]
-    return float(loc["lat"]), float(loc["lon"]), loc.get("display_name", addr)
+    except Exception:
+        return None
 
 # ----------------------------
-# SerpAPI nearby search (OpenStreetMap-based)
+# Fetch nearby places using SerpAPI (OpenStreetMap base)
 # ----------------------------
 def fetch_nearby_places(lat: float, lng: float, query: str, radius_m: int = 2000, max_results: int = 10):
     url = "https://serpapi.com/search"
@@ -63,32 +77,34 @@ def fetch_nearby_places(lat: float, lng: float, query: str, radius_m: int = 2000
         "type": "search",
         "api_key": SERP_API_KEY
     }
-    resp = requests.get(url, params=params, timeout=20)
-    data = resp.json()
-    results = []
-    for place in data.get("local_results", [])[:max_results]:
-        results.append({
-            "name": place.get("title"),
-            "address": place.get("address"),
-            "gps": place.get("gps_coordinates", {}),
-            "rating": place.get("rating"),
-            "link": place.get("link")
-        })
-    return results
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        data = resp.json()
+        results = []
+        for place in data.get("local_results", [])[:max_results]:
+            results.append({
+                "name": place.get("title"),
+                "address": place.get("address"),
+                "gps": place.get("gps_coordinates", {}),
+                "rating": place.get("rating"),
+                "link": place.get("link")
+            })
+        return results
+    except Exception:
+        return []
 
 # ----------------------------
-# Ticketmaster events (city only)
+# Ticketmaster Events
 # ----------------------------
 def fetch_ticketmaster_events(city: str, max_results: int = 20):
     url = "https://app.ticketmaster.com/discovery/v2/events.json"
-    params = {
-        "apikey": TICKETMASTER_KEY,
-        "city": city,
-        "size": max_results,
-        "sort": "date,asc"
-    }
-    resp = requests.get(url, params=params, timeout=15)
-    data = resp.json()
+    params = {"apikey": TICKETMASTER_KEY, "city": city, "size": max_results, "sort": "date,asc"}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        data = resp.json()
+    except Exception:
+        return []
+
     events = []
     for ev in data.get("_embedded", {}).get("events", []):
         ev_date = None
@@ -114,12 +130,14 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
     return events
 
 # ----------------------------
-# Sidebar: persistent session state
+# Sidebar (Persistent Location)
 # ----------------------------
 if "location" not in st.session_state:
     st.session_state.location = {
-        "lat": 33.6844, "lng": 73.0479,
-        "city": "Islamabad", "faddr": "Islamabad, Pakistan"
+        "lat": 33.6844,
+        "lng": 73.0479,
+        "city": "Islamabad",
+        "faddr": "Islamabad, Pakistan"
     }
 
 with st.sidebar.expander("🔎 Search by city/area", expanded=True):
@@ -132,7 +150,8 @@ with st.sidebar.expander("🔎 Search by city/area", expanded=True):
         if out:
             lat, lng, faddr = out
             st.session_state.location = {
-                "lat": lat, "lng": lng,
+                "lat": lat,
+                "lng": lng,
                 "city": city_input.title(),
                 "faddr": faddr
             }
@@ -158,21 +177,21 @@ st.sidebar.subheader("Filter by Event Date")
 date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value=None)
 
 # ----------------------------
-# Fetch data
+# Fetch Data
 # ----------------------------
 st.title("Nearby Training & Schools + Live Events")
 st.caption("Now using OpenStreetMap (via SerpAPI) + Ticketmaster events integration")
 
-with st.spinner("Fetching nearby places…"):
+with st.spinner("Fetching nearby institutions..."):
     results = fetch_nearby_places(lat, lng, "training center")
 
-with st.spinner("Fetching live Ticketmaster events…"):
+with st.spinner("Fetching live Ticketmaster events..."):
     events = fetch_ticketmaster_events(city)
 
 st.subheader(f"Found {len(results)} nearby institutions and {len(events)} events")
 
 # ----------------------------
-# Map render (OpenStreetMap)
+# Map (Leaflet + OSM)
 # ----------------------------
 MAP_HTML = f"""
 <!DOCTYPE html>
@@ -210,7 +229,7 @@ MAP_HTML = f"""
 components.html(MAP_HTML, height=520, scrolling=False)
 
 # ----------------------------
-# Event List (modern card UI)
+# Events Display (Enhanced)
 # ----------------------------
 st.subheader(f"🎟️ Live & Upcoming Events in {city}")
 
