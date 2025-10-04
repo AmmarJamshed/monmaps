@@ -1,279 +1,255 @@
-import os
 import json
-from datetime import date, timedelta
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
 import requests
 import streamlit as st
-from langchain_openai import ChatOpenAI
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
+from dateutil import parser
 
-# ================================
-# Page Config + Theme
-# ================================
-st.set_page_config(page_title="MonTravels", page_icon="🧭", layout="wide")
+# ----------------------------
+# Config
+# ----------------------------
+st.set_page_config(page_title="Nearby Training & Schools + Events", page_icon="🗺️", layout="wide")
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #F5F7FA; font-family: 'Trebuchet MS', sans-serif; }
-    h1 { color: #FFCC00; text-shadow: 2px 2px 0px #3B4CCA; }
-    h2, h3 { color: #3B4CCA; }
-    div.stButton > button {
-        background-color: #FF1C1C; color: white;
-        border-radius: 8px; border: 2px solid #3B4CCA; font-weight: bold;
-    }
-    div.stButton > button:hover {
-        background-color: #FFCC00; color: #2C2C2C; border: 2px solid #FF1C1C;
-    }
-    section[data-testid="stSidebar"] { background-color: #3B4CCA; color: white; }
-    section[data-testid="stSidebar"] label,
-    section[data-testid="stSidebar"] span,
-    section[data-testid="stSidebar"] div[role="button"] {
-        color: white !important;
-    }
-    section[data-testid="stSidebar"] input,
-    section[data-testid="stSidebar"] textarea,
-    section[data-testid="stSidebar"] select {
-        color: #0f172a !important;
-        background-color: #eef2ff !important;
-        border-radius: 6px !important;
-    }
-    .agent-card {
-        background-color: white; padding: 15px; margin: 10px 0;
-        border-radius: 10px; box-shadow: 0px 2px 5px rgba(0,0,0,0.1);
-    }
-    .agent-card h4 { color: #3B4CCA; margin-bottom: 5px; }
-    .agent-card p { margin: 2px 0; }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("🧭 MonTravels – Travel with Wisdom")
-
-# ================================
-# API Keys
-# ================================
 SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "")
-if not SERPAPI_KEY:
-    st.warning("⚠️ Add SERPAPI_KEY to your .streamlit/secrets.toml for live results.")
+TICKETMASTER_KEY = st.secrets.get("TICKETMASTER_API_KEY", "")
 
-# ================================
-# Initialize Groq (via LangChain)
-# ================================
-llm = ChatOpenAI(
-    model="llama-3.1-8b-instant",
-    api_key=os.getenv("GROQ_API_KEY"),
-    openai_api_base="https://api.groq.com/openai/v1",
-    temperature=0.4,
-    max_tokens=2800,
-)
+if not SERPAPI_KEY or not TICKETMASTER_KEY:
+    st.error("Add SERPAPI_KEY and TICKETMASTER_API_KEY in .streamlit/secrets.toml to run this app.")
+    st.stop()
 
-# ================================
-# Helper: Geocode city for map centering
-# ================================
-def geocode_city(city: str):
-    """Get lat/lng of a city from OSM Nominatim."""
+# Auto-refresh control
+refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5)
+st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
+
+# ----------------------------
+# Geolocation Support
+# ----------------------------
+try:
+    from streamlit_geolocation import geolocation
+    HAS_GEO = True
+except Exception:
+    HAS_GEO = False
+
+TRAINING_KEYWORDS = [
+    "training center", "academy", "bootcamp", "coaching center",
+    "institute", "skill development", "IELTS", "Data Science", "Python"
+]
+
+# ----------------------------
+# OpenStreetMap Geocoding
+# ----------------------------
+def geocode_address(addr: str) -> Optional[Tuple[float, float, str]]:
+    """Get lat/lng from OpenStreetMap Nominatim API."""
     url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": city, "format": "json", "limit": 1, "accept-language": "en"}
-    r = requests.get(url, params=params, headers={"User-Agent": "montravels-app"})
+    params = {
+        "q": addr,
+        "format": "json",
+        "limit": 1,
+        "accept-language": "en"
+    }
+    r = requests.get(url, params=params, headers={"User-Agent": "monmaps-app"})
     data = r.json()
     if not data:
-        return 0, 0
-    return float(data[0]["lat"]), float(data[0]["lon"])
+        return None
+    res = data[0]
+    return (float(res["lat"]), float(res["lon"]), res.get("display_name", addr))
 
-# ================================
-# SerpAPI Hotel Search
-# ================================
-def fetch_hotels_serpapi(city, type="hotel"):
-    """Fetch hotels or other lodging from SerpAPI's Google Maps results."""
-    if not SERPAPI_KEY:
-        return []
+# ----------------------------
+# SerpAPI for nearby places
+# ----------------------------
+def fetch_places_serpapi(lat: float, lng: float, radius_m: int, keywords: List[str]):
+    """Fetch nearby places from SerpAPI using Google Maps engine."""
     url = "https://serpapi.com/search.json"
     params = {
         "engine": "google_maps",
-        "q": f"{type}s in {city}",
+        "ll": f"@{lat},{lng},{radius_m}m",
         "type": "search",
+        "q": " OR ".join(keywords),
         "api_key": SERPAPI_KEY
     }
-    r = requests.get(url, params=params, timeout=20)
+    r = requests.get(url, params=params, timeout=25)
     data = r.json()
-    results = []
-    for item in data.get("local_results", [])[:10]:
+    places = []
+    for item in data.get("local_results", []):
         coords = item.get("gps_coordinates", {})
-        results.append({
-            "name": item.get("title"),
-            "address": item.get("address"),
-            "rating": item.get("rating"),
+        places.append({
+            "name": item.get("title", "Unnamed Place"),
             "lat": coords.get("latitude"),
             "lng": coords.get("longitude"),
+            "address": item.get("address", ""),
+            "rating": item.get("rating"),
+            "reviews": item.get("reviews"),
             "link": item.get("website") or item.get("place_id")
         })
-    return results
+    return places
 
-# ================================
-# Map Renderer (OpenStreetMap + Leaflet)
-# ================================
-def render_map(center_lat, center_lng, places):
-    map_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8" />
-      <title>Hotels Map</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-      <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-      <style>html, body, #map {{ height: 100%; margin:0; padding:0; }}</style>
-    </head>
-    <body>
-    <div id="map"></div>
-    <script>
-      var map = L.map('map').setView([{center_lat}, {center_lng}], 13);
-      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-        attribution: '© OpenStreetMap contributors'
-      }}).addTo(map);
+# ----------------------------
+# Ticketmaster API
+# ----------------------------
+def fetch_ticketmaster_events(city: str, max_results: int = 20):
+    url = "https://app.ticketmaster.com/discovery/v2/events.json"
+    params = {
+        "apikey": TICKETMASTER_KEY,
+        "city": city,
+        "size": max_results,
+        "sort": "date,asc"
+    }
+    resp = requests.get(url, params=params, timeout=15)
+    data = resp.json()
 
-      var places = {json.dumps(places)};
-      places.forEach(function(p) {{
-        if (p.lat && p.lng) {{
-          var marker = L.marker([p.lat, p.lng]).addTo(map);
-          marker.bindPopup("<b>" + (p.name || 'Unknown') + "</b><br/>" +
-                           (p.address || '') + "<br/>⭐ " + (p.rating || 'N/A'));
-        }}
+    events = []
+    for ev in data.get("_embedded", {}).get("events", []):
+        ev_date = None
+        if ev.get("dates", {}).get("start", {}).get("localDate"):
+            try:
+                ev_date = parser.parse(ev["dates"]["start"]["localDate"]).date()
+            except:
+                pass
+        venues = ev.get("_embedded", {}).get("venues", [])
+        events.append({
+            "name": ev.get("name"),
+            "description": ev.get("info", "") or ev.get("pleaseNote", ""),
+            "link": ev.get("url", ""),
+            "date": ev_date,
+            "venue": venues[0].get("name") if venues else "",
+            "lat": float(venues[0]["location"]["latitude"]) if venues and "location" in venues[0] else None,
+            "lng": float(venues[0]["location"]["longitude"]) if venues and "location" in venues[0] else None
+        })
+    return events
+
+# ----------------------------
+# Sidebar Controls
+# ----------------------------
+st.sidebar.header("Find Nearby (SerpAPI + OSM)")
+lat = lng = None
+got_loc = False
+
+if HAS_GEO:
+    with st.sidebar.expander("📍 Use my device location", expanded=False):
+        loc = geolocation()
+        if loc and "latitude" in loc and "longitude" in loc:
+            lat = float(loc["latitude"]); lng = float(loc["longitude"])
+            got_loc = True
+            st.success(f"Got device location: {lat:.5f}, {lng:.5f}")
+
+with st.sidebar.expander("🔎 Or search by city/area", expanded=not got_loc):
+    city = st.text_input("City", value="New York")
+    area = st.text_input("Area / Locality (optional)", value="")
+    if st.button("Locate"):
+        query = f"{area}, {city}" if area else city
+        out = geocode_address(query)
+        if out:
+            lat, lng, faddr = out
+            st.success(f"Centered to: {faddr}")
+            got_loc = True
+        else:
+            st.error("Could not find that location.")
+
+if not got_loc:
+    lat, lng = 33.6844, 73.0479
+    city = "Islamabad"
+
+radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
+radius_m = radius_km * 1000
+
+st.sidebar.subheader("Search Focus")
+selected_kw = st.sidebar.multiselect(
+    "Choose keywords",
+    options=TRAINING_KEYWORDS,
+    default=["Data Science", "Python"]
+)
+
+st.sidebar.subheader("Filter by Event Date")
+date_filter = st.sidebar.date_input("Choose a date (leave blank for all)", value=None)
+
+# ----------------------------
+# Fetch Data
+# ----------------------------
+st.title("Nearby Training & Schools + Live Events")
+st.caption("Powered by SerpAPI (Google Maps data) + OpenStreetMap for display.")
+
+with st.spinner("Fetching nearby places…"):
+    results = fetch_places_serpapi(lat, lng, radius_m, selected_kw)
+
+with st.spinner(f"Fetching live Ticketmaster events for {city}…"):
+    events = fetch_ticketmaster_events(city)
+
+st.subheader(f"Found {len(results)} nearby places and {len(events)} upcoming events")
+
+# ----------------------------
+# Display Map (Leaflet + OSM)
+# ----------------------------
+map_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Training Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <style>html, body, #map {{ height: 100%; margin:0; padding:0; }}</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+  var map = L.map('map').setView([{lat}, {lng}], {14 if radius_km<=5 else 12});
+  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    attribution: '© OpenStreetMap contributors'
+  }}).addTo(map);
+
+  var places = {json.dumps(results, default=str)};
+  places.forEach(function(p) {{
+    if (p.lat && p.lng) {{
+      var marker = L.marker([p.lat, p.lng]).addTo(map);
+      marker.bindPopup("<b>" + p.name + "</b><br/>" + (p.address || "") +
+                       "<br/>⭐ " + (p.rating || "N/A") +
+                       "<br/><a href='" + (p.link || "#") + "' target='_blank'>Details</a>");
+    }}
+  }});
+
+  var events = {json.dumps(events, default=str)};
+  events.forEach(function(e) {{
+    if (e.lat && e.lng) {{
+      var icon = L.icon({{
+        iconUrl: 'https://maps.gstatic.com/mapfiles/ms2/micons/orange-dot.png',
+        iconSize: [25, 41], iconAnchor: [12, 41]
       }});
-    </script>
-    </body>
-    </html>
-    """
-    components.html(map_html, height=560, scrolling=False)
+      var marker = L.marker([e.lat, e.lng], {{icon: icon}}).addTo(map);
+      marker.bindPopup("<b>" + e.name + "</b><br/>📅 " + (e.date || 'TBA') +
+                       "<br/>" + (e.venue || '') +
+                       "<br/><a href='" + e.link + "' target='_blank'>More Info</a>");
+    }}
+  }});
+</script>
+</body>
+</html>
+"""
+components.html(map_html, height=560, scrolling=False)
 
-# ================================
-# Function to generate itinerary
-# ================================
-def generate_itinerary(city, area, start, end, interests, budget, adults):
-    days = max((end - start).days, 1)
-    prompt = f"""
-    You are an expert travel planner.
-
-    Create a detailed {days}-day travel itinerary for {city}, {area or ''}.
-    It MUST include exactly {days} full days, clearly labeled as:
-    Day 1, Day 2, ..., Day {days}.
-    
-    For each day:
-    - Morning, Afternoon, and Evening activities
-    - Meals with budget-friendly suggestions
-    - Practical tips
-    - Daily notes
-
-    Focus on interests: {', '.join(interests)}.
-    Budget: ${budget} per day for {adults} adults.
-    """
-    resp = llm.invoke(prompt)
-    return resp.content
-
-# ================================
-# Sidebar Inputs
-# ================================
-with st.sidebar:
-    city = st.text_input("Destination*").strip()
-    area = st.text_input("Area (optional)").strip()
-    c1, c2 = st.columns(2)
-    with c1: start_date = st.date_input("Start", date.today() + timedelta(days=7))
-    with c2: end_date   = st.date_input("End",   date.today() + timedelta(days=10))
-    adults  = st.number_input("Adults", 1, 10, 2)
-    budget  = st.number_input("Budget ($/day)", 10, 1000, 100)
-    interests = st.multiselect(
-        "Interests",
-        ["food","history","museums","nature","nightlife"],
-        default=["food","history"]
-    )
-    lodging_choice = st.selectbox(
-        "Lodging Type",
-        ["All", "Hotels", "Residences", "Motels"]
-    )
-    go = st.button("✨ Build Plan")
-
-# ================================
-# Main Action
-# ================================
-if go:
-    if not city:
-        st.error("Please enter a destination.")
-        st.stop()
-
-    with st.spinner("Building your personalized itinerary..."):
-        itinerary = generate_itinerary(city, area, start_date, end_date, interests, budget, adults)
-
-    # Get base map center
-    lat, lng = geocode_city(city)
-
-    # Two-column layout
-    col1, col2 = st.columns([2, 1])
-
-    # --- LEFT: Itinerary ---
-    with col1:
-        st.subheader("🗓️ Your Itinerary")
-        st.write(itinerary)
-
-    # --- RIGHT: Lodging Options ---
-    with col2:
-        st.subheader("🏨 Lodging Suggestions")
-
-        all_places = []
-
-        if lodging_choice in ["All", "Hotels"]:
-            st.markdown("### 🏨 Hotels")
-            hotels = fetch_hotels_serpapi(city, "hotel")
-            if not hotels:
-                st.caption("No hotels found.")
-            else:
-                all_places.extend(hotels)
-                for h in hotels:
-                    st.markdown(f"""
-**{h['name']}**  
-📍 {h['address']}  
-⭐ Rating: {h.get('rating', 'N/A')}
-""")
-
-        if lodging_choice in ["All", "Residences"]:
-            st.markdown("### 🏡 Residences & Apartments")
-            residences = fetch_hotels_serpapi(city, "residence")
-            if not residences:
-                st.caption("No residences found.")
-            else:
-                all_places.extend(residences)
-                for r in residences:
-                    st.markdown(f"""
-**{r['name']}**  
-📍 {r['address']}  
-⭐ Rating: {r.get('rating', 'N/A')}
-""")
-
-        if lodging_choice in ["All", "Motels"]:
-            st.markdown("### 🛏️ Motels")
-            motels = fetch_hotels_serpapi(city, "motel")
-            if not motels:
-                st.caption("No motels found.")
-            else:
-                all_places.extend(motels)
-                for m in motels:
-                    st.markdown(f"""
-**{m['name']}**  
-📍 {m['address']}  
-⭐ Rating: {m.get('rating', 'N/A')}
-""")
-
-        if all_places:
-            render_map(lat, lng, all_places)
-
-        # Travel Agents block
-        st.subheader("✈️ Travel Agents")
-        agents = [
-            {"name": "GlobeTrek Tours", "desc": "Cultural & family packages", "email": "info@globetrek.com"},
-            {"name": "SkyHigh Travels", "desc": "Custom itineraries & visa support", "email": "bookings@skyhigh.com"}
-        ]
-        for a in agents:
+# ----------------------------
+# Event List
+# ----------------------------
+st.subheader(f"Live & Upcoming Events in {city}")
+if not events:
+    st.info("No upcoming events found.")
+else:
+    if date_filter:
+        filtered = [e for e in events if e["date"] and e["date"] == date_filter]
+    else:
+        filtered = events
+    if not filtered:
+        st.warning("No events found for this date.")
+    else:
+        for e in filtered:
+            link_md = f"[More Info]({e['link']})" if e['link'] else ""
+            venue = f"📍 {e['venue']}" if e.get("venue") else ""
             st.markdown(f"""
-            <div class="agent-card">
-                <h4>{a['name']}</h4>
-                <p>{a['desc']}</p>
-                <p><a href="mailto:{a['email']}?subject=MonTravels {city} Trip">📧 Contact</a></p>
-            </div>
-            """, unsafe_allow_html=True)
+            **{e['name']}**  
+            📅 {e['date'] if e['date'] else "Unspecified"}  
+            {e['description']}  
+            {venue}  
+            {link_md}
+            """)
