@@ -1,110 +1,106 @@
 import json
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 from dateutil import parser
+from streamlit_autorefresh import st_autorefresh
 
 # --------------------------------------------------
 # CONFIGURATION
 # --------------------------------------------------
-st.set_page_config(page_title="Nearby Training & Schools + Events", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="MonMaps — Training & Events Near You", page_icon="🗺️", layout="wide")
 
-SERP_API_KEY = st.secrets.get("SERP_API_KEY", "")
+AWS_API_KEY = st.secrets.get("AWS_LOCATION_API_KEY", "")
+AWS_REGION = st.secrets.get("AWS_REGION", "ap-south-1")  # ✅ Mumbai
+MAP_NAME = st.secrets.get("MAP_NAME", "MonMapsMap")
+PLACE_INDEX = st.secrets.get("PLACE_INDEX", "MonMapsPlaces")
+ROUTE_CALCULATOR = st.secrets.get("ROUTE_CALCULATOR", "MonMapsRoutes")
 TICKETMASTER_KEY = st.secrets.get("TICKETMASTER_API_KEY", "")
 
-if not SERP_API_KEY or not TICKETMASTER_KEY:
-    st.error("Add SERP_API_KEY and TICKETMASTER_API_KEY in .streamlit/secrets.toml to run this app.")
+if not AWS_API_KEY:
+    st.error("Please set AWS_LOCATION_API_KEY and other variables in .streamlit/secrets.toml")
     st.stop()
 
 refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5)
 st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
 
 # --------------------------------------------------
-# UTILITIES
+# CONSTANTS
 # --------------------------------------------------
-try:
-    from streamlit_geolocation import geolocation
-    HAS_GEO = True
-except Exception:
-    HAS_GEO = False
-
 TRAINING_KEYWORDS = [
     "training center", "academy", "bootcamp", "coaching center",
     "institute", "skill development", "IELTS", "Data Science", "Python"
 ]
 
 # --------------------------------------------------
-# SAFE OPENSTREETMAP GEOCODER
+# FETCH NEARBY PLACES (AMAZON LOCATION)
 # --------------------------------------------------
-def geocode_address(addr: str, country: Optional[str] = None) -> Optional[Tuple[float, float, str]]:
-    """Safely geocode using OpenStreetMap (Nominatim)."""
-    query = f"{addr}, {country}" if country else addr
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": query, "format": "json", "limit": 1}
-
-    try:
-        r = requests.get(url, params=params, timeout=15, headers={"User-Agent": "MonMapsApp"})
-        r.raise_for_status()
-        data = r.json()
-
-        if not data or not isinstance(data, list):
-            return None
-
-        loc = data[0]
-        lat = float(loc.get("lat"))
-        lon = float(loc.get("lon"))
-        display_name = loc.get("display_name", query)
-        return lat, lon, display_name
-
-    except requests.exceptions.RequestException as e:
-        st.warning(f"⚠️ Could not fetch location from OpenStreetMap: {e}")
-        return None
-    except Exception:
-        return None
-
-# --------------------------------------------------
-# SERPAPI SEARCH (OpenStreetMap-BASED)
-# --------------------------------------------------
-def fetch_nearby_places(lat: float, lng: float, query: str, radius_m: int = 2000, max_results: int = 10):
-    url = "https://serpapi.com/search"
-    params = {
-        "engine": "google_maps",
-        "q": query,
-        "ll": f"@{lat},{lng},{radius_m}m",
-        "type": "search",
-        "api_key": SERP_API_KEY
+def fetch_nearby_places(lat: float, lng: float, query: str, max_results: int = 10):
+    """Search for places using Amazon Location Service (Places API)."""
+    url = f"https://places.geo.{AWS_REGION}.amazonaws.com/places/v0/indexes/{PLACE_INDEX}/search-text"
+    headers = {
+        "X-Amz-Api-Key": AWS_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "Text": query,
+        "BiasPosition": [lng, lat],
+        "MaxResults": max_results
     }
     try:
-        resp = requests.get(url, params=params, timeout=20)
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
         data = resp.json()
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch places: {e}")
         return []
 
     results = []
-    for place in data.get("local_results", [])[:max_results]:
-        results.append({
-            "name": place.get("title"),
-            "address": place.get("address"),
-            "gps": place.get("gps_coordinates", {}),
-            "rating": place.get("rating"),
-            "link": place.get("link")
-        })
+    for p in data.get("Results", []):
+        place = p.get("Place", {})
+        coords = place.get("Geometry", {}).get("Point", [None, None])
+        if coords and len(coords) == 2:
+            results.append({
+                "type": "institute",
+                "name": place.get("Label", "Unknown"),
+                "address": place.get("AddressNumber", "") + " " + place.get("Street", ""),
+                "gps": {"latitude": coords[1], "longitude": coords[0]},
+                "rating": "N/A",
+                "link": f"https://www.google.com/maps?q={coords[1]},{coords[0]}"
+            })
     return results
 
 # --------------------------------------------------
-# TICKETMASTER EVENTS
+# CALCULATE ROUTE DISTANCE / TIME (AMAZON LOCATION)
+# --------------------------------------------------
+def calculate_route(start: tuple, end: tuple):
+    """Calculate distance and duration between two points."""
+    url = f"https://routes.geo.{AWS_REGION}.amazonaws.com/routes/v0/calculators/{ROUTE_CALCULATOR}/calculate/route"
+    headers = {
+        "X-Amz-Api-Key": AWS_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "DeparturePositions": [[start[1], start[0]]],
+        "DestinationPositions": [[end[1], end[0]]],
+        "TravelMode": "Car"
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        data = resp.json()
+        if "Routes" in data and len(data["Routes"]) > 0:
+            summary = data["Routes"][0]["Summary"]
+            return round(summary["Distance"], 2), round(summary["DurationSeconds"] / 60, 1)
+    except Exception as e:
+        st.warning(f"⚠️ Route error: {e}")
+    return None, None
+
+# --------------------------------------------------
+# FETCH TICKETMASTER EVENTS
 # --------------------------------------------------
 def fetch_ticketmaster_events(city: str, max_results: int = 20):
     url = "https://app.ticketmaster.com/discovery/v2/events.json"
-    params = {
-        "apikey": TICKETMASTER_KEY,
-        "city": city,
-        "size": max_results,
-        "sort": "date,asc"
-    }
+    params = {"apikey": TICKETMASTER_KEY, "city": city, "size": max_results, "sort": "date,asc"}
     try:
         resp = requests.get(url, params=params, timeout=15)
         data = resp.json()
@@ -125,6 +121,7 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
             lat = float(venues[0]["location"]["latitude"])
             lng = float(venues[0]["location"]["longitude"])
         events.append({
+            "type": "event",
             "name": ev.get("name"),
             "description": ev.get("info", "") or ev.get("pleaseNote", ""),
             "link": ev.get("url", ""),
@@ -136,131 +133,117 @@ def fetch_ticketmaster_events(city: str, max_results: int = 20):
     return events
 
 # --------------------------------------------------
-# SIDEBAR WITH SESSION STATE
+# SIDEBAR INPUTS
 # --------------------------------------------------
 if "location" not in st.session_state:
     st.session_state.location = {
-        "lat": 33.6844, "lng": 73.0479,
-        "city": "Islamabad", "faddr": "Islamabad, Pakistan"
+        "lat": 19.0760, "lng": 72.8777,
+        "city": "Mumbai", "faddr": "Mumbai, India"
     }
 
 with st.sidebar.expander("🔎 Search by City / Area", expanded=True):
     city_input = st.text_input("City", value=st.session_state.location["city"])
-    area_input = st.text_input("Area / Locality (optional)", value="")
-    country_input = st.text_input("Country", value="Pakistan")
-    if st.button("Locate"):
-        query = f"{area_input}, {city_input}" if area_input else city_input
-        out = geocode_address(query, country=country_input)
-        if out:
-            lat, lng, faddr = out
-            st.session_state.location = {
-                "lat": lat, "lng": lng,
-                "city": city_input.title(),
-                "faddr": faddr
-            }
-            st.success(f"Centered to: {faddr}")
-        else:
-            st.error("Could not find that location.")
+    lat = st.number_input("Latitude", value=st.session_state.location["lat"], format="%.6f")
+    lng = st.number_input("Longitude", value=st.session_state.location["lng"], format="%.6f")
+    if st.button("Update Location"):
+        st.session_state.location = {"lat": lat, "lng": lng, "city": city_input, "faddr": city_input}
+        st.success(f"Location updated to {city_input}")
+
+radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
+st.sidebar.subheader("Search Keywords")
+selected_kw = st.sidebar.multiselect("Choose keywords", options=TRAINING_KEYWORDS, default=["Data Science", "Python"])
+st.sidebar.subheader("Filter by Event Date")
+date_filter = st.sidebar.date_input("Choose a date (optional)", value=None)
 
 lat = st.session_state.location["lat"]
 lng = st.session_state.location["lng"]
 city = st.session_state.location["city"]
 
-radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
-radius_m = radius_km * 1000
-
-st.sidebar.subheader("Search Focus")
-selected_kw = st.sidebar.multiselect(
-    "Choose keywords",
-    options=TRAINING_KEYWORDS,
-    default=["Data Science", "Python"]
-)
-
-st.sidebar.subheader("Filter by Event Date")
-date_filter = st.sidebar.date_input("Choose a date (optional)", value=None)
-
 # --------------------------------------------------
 # FETCH DATA
 # --------------------------------------------------
-st.title("Nearby Training & Schools + Live Events")
-st.caption("Free version powered by OpenStreetMap (for geocoding) + SerpAPI (for nearby search) + Ticketmaster (for events).")
+st.title("🗺️ MonMaps — Nearby Training & Events (AWS + Ticketmaster)")
+st.caption("Amazon Location Service for Maps & Routing + Ticketmaster API for Live Events")
 
-with st.spinner("Fetching nearby places…"):
-    results = fetch_nearby_places(lat, lng, "training center")
+with st.spinner("Fetching nearby institutes…"):
+    results = []
+    for kw in selected_kw:
+        results.extend(fetch_nearby_places(lat, lng, kw))
 
-with st.spinner("Fetching live Ticketmaster events…"):
+with st.spinner("Fetching live events…"):
     events = fetch_ticketmaster_events(city)
 
-st.subheader(f"Found {len(results)} nearby institutions and {len(events)} upcoming events")
+st.subheader(f"Found {len(results)} institutes and {len(events)} events in {city}")
 
 # --------------------------------------------------
-# MAP DISPLAY (OpenStreetMap + Leaflet)
+# COMBINE ALL LOCATIONS FOR MAP
+# --------------------------------------------------
+all_points = []
+for r in results:
+    all_points.append({
+        "type": "institute",
+        "name": r["name"],
+        "lat": r["gps"]["latitude"],
+        "lng": r["gps"]["longitude"],
+        "popup": f"<b>{r['name']}</b><br>{r['address']}<br><a href='{r['link']}' target='_blank'>Open</a>"
+    })
+for e in events:
+    if e.get("lat") and e.get("lng"):
+        dist, time = calculate_route((lat, lng), (e["lat"], e["lng"]))
+        popup = f"<b>{e['name']}</b><br>📅 {e['date']}<br>🏛️ {e['venue']}<br>🚗 {dist} km ⏱️ {time} min<br><a href='{e['link']}' target='_blank'>Book</a>"
+        all_points.append({
+            "type": "event",
+            "name": e["name"],
+            "lat": e["lat"],
+            "lng": e["lng"],
+            "popup": popup
+        })
+
+# --------------------------------------------------
+# MAP DISPLAY (AMAZON LOCATION + MAPLIBRE)
 # --------------------------------------------------
 MAP_HTML = f"""
 <!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
-    <style>html, body, #map {{ height: 100%; margin: 0; padding: 0; }}</style>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <title>MonMaps</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+    <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>body,html,#map{{height:100%;margin:0;padding:0;}}</style>
   </head>
   <body>
     <div id="map"></div>
     <script>
-      var map = L.map('map').setView([{lat}, {lng}], 13);
-      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-        maxZoom: 19,
-        attribution: '© OpenStreetMap contributors'
-      }}).addTo(map);
-
-      var userMarker = L.marker([{lat}, {lng}]).addTo(map)
-        .bindPopup('You are here').openPopup();
-
-      var places = {json.dumps(results)};
-      places.forEach(function(p) {{
-        if (p.gps && p.gps.latitude && p.gps.longitude) {{
-          var m = L.marker([p.gps.latitude, p.gps.longitude]).addTo(map);
-          var html = `<b>${{p.name}}</b><br>${{p.address}}<br>⭐ ${{p.rating || 'N/A'}}<br><a href="${{p.link}}" target="_blank">Open in Maps</a>`;
-          m.bindPopup(html);
+      const map = new maplibregl.Map({{
+        container: 'map',
+        style: 'https://maps.geo.{AWS_REGION}.amazonaws.com/maps/v0/maps/{MAP_NAME}/style-descriptor',
+        center: [{lng}, {lat}],
+        zoom: 11,
+        transformRequest: (url, resourceType) => {{
+          if (url.includes('amazonaws.com')) {{
+            return {{ url: url, headers: {{ 'X-Amz-Api-Key': '{AWS_API_KEY}' }} }};
+          }}
+          return {{ url }};
         }}
+      }});
+
+      const userMarker = new maplibregl.Marker({{color:'#007AFF'}})
+        .setLngLat([{lng}, {lat}])
+        .setPopup(new maplibregl.Popup().setText('You are here'))
+        .addTo(map);
+
+      const points = {json.dumps(all_points)};
+      points.forEach(p => {{
+        const color = p.type === 'event' ? '#E91E63' : '#4CAF50';
+        const m = new maplibregl.Marker({{color}})
+          .setLngLat([p.lng, p.lat])
+          .setPopup(new maplibregl.Popup().setHTML(p.popup))
+          .addTo(map);
       }});
     </script>
   </body>
 </html>
 """
-components.html(MAP_HTML, height=520, scrolling=False)
-
-# --------------------------------------------------
-# EVENT LIST (IMPROVED PRESENTATION)
-# --------------------------------------------------
-st.subheader(f"🎟️ Live & Upcoming Events in {city}")
-
-if not events:
-    st.info("No upcoming events found.")
-else:
-    filtered_events = events
-    if date_filter:
-        filtered_events = [e for e in events if e["date"] and e["date"] == date_filter]
-
-    if not filtered_events:
-        st.warning("No events found for this date.")
-    else:
-        for e in filtered_events:
-            gmap_url = (
-                f"https://www.google.com/maps/search/?api=1&query={e['lat']},{e['lng']}"
-                if e.get("lat") and e.get("lng")
-                else ""
-            )
-            book_link = f"[🎫 Book Event Here]({e['link']})" if e.get("link") else ""
-            map_link = f"[📍 View on Google Maps]({gmap_url})" if gmap_url else ""
-
-            st.markdown(f"""
-<div style="background:#f9f9ff; padding:15px; border-radius:10px; margin-bottom:10px; border:1px solid #e0e0e0;">
-  <h4 style="margin-bottom:5px; color:#1a73e8;">{e['name']}</h4>
-  <p>📅 <b>{e['date'] if e['date'] else 'Unspecified'}</b></p>
-  <p>🏛️ {e.get('venue','')}<br>🗺️ {city}</p>
-  <p>{e.get('description','')}</p>
-  {book_link}<br>{map_link}
-</div>
-""", unsafe_allow_html=True)
+components.html(MAP_HTML, height=540, scrolling=False)
