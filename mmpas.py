@@ -21,7 +21,7 @@ ROUTE_CALCULATOR = st.secrets.get("ROUTE_CALCULATOR", "")
 TICKETMASTER_KEY = st.secrets.get("TICKETMASTER_API_KEY", "")
 
 if not AWS_LOCATION_API_KEY or not AWS_ROUTE_API_KEY:
-    st.error("Please add AWS_LOCATION_API_KEY and AWS_ROUTE_API_KEY in .streamlit/secrets.toml.")
+    st.error("❌ Please add AWS_LOCATION_API_KEY and AWS_ROUTE_API_KEY in .streamlit/secrets.toml.")
     st.stop()
 
 refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5)
@@ -31,11 +31,11 @@ st_autorefresh(interval=refresh_interval * 60 * 1000, key="auto_refresh")
 # UTILITIES
 # --------------------------------------------------
 TRAINING_KEYWORDS = [
-    "training center", "academy", "bootcamp", "coaching center",
-    "institute", "skill development", "IELTS", "Data Science", "Python"
+    "training", "academy", "bootcamp", "coaching", "education",
+    "institute", "skill development", "Data Science", "Python"
 ]
 
-def fetch_aws_places(text, lat, lng, max_results=10):
+def fetch_aws_places(text, lat, lng, max_results=50):
     """Query AWS Location Places index for nearby results"""
     url = f"https://places.geo.{AWS_REGION}.amazonaws.com/places/v0/indexes/{PLACE_INDEX}/search/text"
     headers = {"X-Amz-Api-Key": AWS_LOCATION_API_KEY, "Content-Type": "application/json"}
@@ -44,6 +44,7 @@ def fetch_aws_places(text, lat, lng, max_results=10):
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         data = r.json()
         if "Results" not in data:
+            st.warning(f"⚠️ AWS returned no results for '{text}'. Raw response:\n{data}")
             return []
         places = []
         for item in data["Results"]:
@@ -63,14 +64,20 @@ def fetch_aws_places(text, lat, lng, max_results=10):
 def fetch_ticketmaster_events(city, max_results=20):
     """Fetch events from Ticketmaster API"""
     if not TICKETMASTER_KEY:
+        st.warning("⚠️ No Ticketmaster API key found.")
         return []
     url = "https://app.ticketmaster.com/discovery/v2/events.json"
     params = {"apikey": TICKETMASTER_KEY, "city": city, "size": max_results, "sort": "date,asc"}
     try:
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
+
+        if "_embedded" not in data:
+            st.info(f"ℹ️ No Ticketmaster events found for {city}. Raw response:\n{data}")
+            return []
+
         events = []
-        for ev in data.get("_embedded", {}).get("events", []):
+        for ev in data["_embedded"]["events"]:
             ev_date = None
             if ev.get("dates", {}).get("start", {}).get("localDate"):
                 try:
@@ -92,7 +99,8 @@ def fetch_ticketmaster_events(city, max_results=20):
                 "lng": lng
             })
         return events
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Ticketmaster error: {e}")
         return []
 
 def fetch_route(start_lat, start_lng, end_lat, end_lng):
@@ -106,8 +114,7 @@ def fetch_route(start_lat, start_lng, end_lat, end_lng):
     }
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
-        data = r.json()
-        return data
+        return r.json()
     except Exception as e:
         st.warning(f"⚠️ Route fetch failed: {e}")
         return {}
@@ -124,7 +131,7 @@ with st.sidebar.expander("🔍 Search by City / Area", expanded=True):
     lng_input = st.number_input("Longitude", value=st.session_state.location["lng"])
     if st.button("Update Location"):
         st.session_state.location = {"lat": lat_input, "lng": lng_input, "city": city_input}
-        st.success(f"Location updated to {city_input}")
+        st.success(f"✅ Location updated to {city_input}")
 
 radius_km = st.sidebar.slider("Radius (km)", 1, 15, 5)
 selected_kw = st.sidebar.multiselect("Search Keywords", TRAINING_KEYWORDS, default=["Data Science", "Python"])
@@ -140,14 +147,15 @@ city = st.session_state.location["city"]
 st.title("🗺️ MonMaps — Nearby Training & Events (AWS + Ticketmaster)")
 st.caption("Powered by Amazon Location Service (HERE) + Ticketmaster")
 
-with st.spinner("Fetching nearby places..."):
+with st.spinner("🔎 Searching AWS Places..."):
     results = []
     for kw in selected_kw:
         results.extend(fetch_aws_places(kw, lat, lng))
-with st.spinner("Fetching Ticketmaster events..."):
+
+with st.spinner("🎫 Fetching Ticketmaster events..."):
     events = fetch_ticketmaster_events(city)
 
-st.subheader(f"Found {len(results)} institutes and {len(events)} events in {city}")
+st.subheader(f"📍 Found {len(results)} institutes and {len(events)} events in {city}")
 
 # --------------------------------------------------
 # MAP DISPLAY
@@ -169,7 +177,7 @@ L.tileLayer('https://maps.geo.{AWS_REGION}.amazonaws.com/maps/v0/maps/{MAP_NAME}
     maxZoom: 18
 }}).addTo(map);
 
-L.marker([{lat},{lng}]).addTo(map).bindPopup("You are here").openPopup();
+L.marker([{lat},{lng}]).addTo(map).bindPopup("📍 You are here").openPopup();
 var places = {json.dumps(results)};
 places.forEach(p => {{
   var m = L.marker([p.lat, p.lng]).addTo(map);
@@ -188,7 +196,7 @@ components.html(MAP_HTML, height=520, scrolling=False)
 st.subheader(f"🎟️ Live & Upcoming Events in {city}")
 
 if not events:
-    st.info("No upcoming events found.")
+    st.info("ℹ️ No upcoming events found for this location. Try searching a larger city (e.g., New York, London).")
 else:
     filtered_events = [e for e in events if not date_filter or (e["date"] and e["date"] == date_filter)]
     for e in filtered_events:
