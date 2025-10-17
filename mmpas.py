@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from dateutil import parser
 import requests
+import boto3
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
@@ -12,16 +13,17 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="MonMaps — Training & Events (AWS + Ticketmaster)", page_icon="🗺️", layout="wide")
 
 # Load secrets
-AWS_LOCATION_API_KEY = st.secrets.get("AWS_LOCATION_API_KEY", "")
-AWS_ROUTE_API_KEY = st.secrets.get("AWS_ROUTE_API_KEY", "")
 AWS_REGION = st.secrets.get("AWS_REGION", "ap-south-1")
 MAP_NAME = st.secrets.get("MAP_NAME", "")
 PLACE_INDEX = st.secrets.get("PLACE_INDEX", "")
 ROUTE_CALCULATOR = st.secrets.get("ROUTE_CALCULATOR", "")
 TICKETMASTER_KEY = st.secrets.get("TICKETMASTER_API_KEY", "")
 
-if not AWS_LOCATION_API_KEY or not AWS_ROUTE_API_KEY:
-    st.error("❌ Please add AWS_LOCATION_API_KEY and AWS_ROUTE_API_KEY in .streamlit/secrets.toml.")
+# Create boto3 client for Amazon Location
+try:
+    location_client = boto3.client("location", region_name=AWS_REGION)
+except Exception as e:
+    st.error(f"❌ Could not initialize AWS Location client. Error: {e}")
     st.stop()
 
 refresh_interval = st.sidebar.slider("Auto-refresh interval (minutes)", 1, 30, 5)
@@ -36,23 +38,22 @@ TRAINING_KEYWORDS = [
 ]
 
 def fetch_aws_places(text, lat, lng, max_results=50):
-    """Query AWS Location Places index for nearby results"""
-    url = f"https://places.geo.{AWS_REGION}.amazonaws.com/places/v0/indexes/{PLACE_INDEX}/search/text"
-    headers = {"X-Amz-Api-Key": AWS_LOCATION_API_KEY, "Content-Type": "application/json"}
-    payload = {"Text": text, "BiasPosition": [lng, lat], "MaxResults": max_results}
+    """Query AWS Location Place Index using boto3 (Signature V4)"""
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        data = r.json()
-        if "Results" not in data:
-            st.warning(f"⚠️ AWS returned no results for '{text}'. Raw response:\n{data}")
-            return []
+        response = location_client.search_place_index_for_text(
+            IndexName=PLACE_INDEX,
+            Text=text,
+            BiasPosition=[lng, lat],
+            MaxResults=max_results
+        )
         places = []
-        for item in data["Results"]:
-            pos = item.get("Place", {}).get("Geometry", {}).get("Point", [])
+        for item in response.get("Results", []):
+            place = item.get("Place", {})
+            pos = place.get("Geometry", {}).get("Point", [])
             if len(pos) == 2:
                 places.append({
-                    "name": item["Place"].get("Label", "Unnamed"),
-                    "address": item["Place"].get("AddressNumber", "") + " " + item["Place"].get("Street", ""),
+                    "name": place.get("Label", "Unnamed"),
+                    "address": place.get("AddressNumber", "") + " " + place.get("Street", ""),
                     "lat": pos[1],
                     "lng": pos[0]
                 })
@@ -104,17 +105,15 @@ def fetch_ticketmaster_events(city, max_results=20):
         return []
 
 def fetch_route(start_lat, start_lng, end_lat, end_lng):
-    """Fetch driving route between two coordinates using AWS Route Calculator"""
-    url = f"https://routes.geo.{AWS_REGION}.amazonaws.com/routes/v0/calculators/{ROUTE_CALCULATOR}/calculate/route"
-    headers = {"X-Amz-Api-Key": AWS_ROUTE_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "DeparturePosition": [start_lng, start_lat],
-        "DestinationPosition": [end_lng, end_lat],
-        "TravelMode": "Car"
-    }
+    """Fetch driving route using AWS SDK (optional)"""
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        return r.json()
+        response = location_client.calculate_route(
+            CalculatorName=ROUTE_CALCULATOR,
+            DeparturePosition=[start_lng, start_lat],
+            DestinationPosition=[end_lng, end_lat],
+            TravelMode="Car"
+        )
+        return response
     except Exception as e:
         st.warning(f"⚠️ Route fetch failed: {e}")
         return {}
@@ -173,7 +172,7 @@ MAP_HTML = f"""
 <div id="map"></div>
 <script>
 var map = L.map('map').setView([{lat},{lng}], 13);
-L.tileLayer('https://maps.geo.{AWS_REGION}.amazonaws.com/maps/v0/maps/{MAP_NAME}/tiles/{{z}}/{{x}}/{{y}}?key={AWS_LOCATION_API_KEY}', {{
+L.tileLayer('https://maps.geo.{AWS_REGION}.amazonaws.com/maps/v0/maps/{MAP_NAME}/tiles/{{z}}/{{x}}/{{y}}?key=YOUR_MAP_KEY', {{
     maxZoom: 18
 }}).addTo(map);
 
