@@ -1,11 +1,5 @@
-lxml
 streamlit
-streamlit-autorefresh
-streamlit-geolocation
-pandas
+boto3
 requests
-beautifulsoup4
 python-dateutil
-langchain
-openai
-langchain-openai
+streamlit-autorefresh
